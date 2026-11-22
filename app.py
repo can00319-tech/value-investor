@@ -621,10 +621,14 @@ def financial_analysis_block(snap: core.StockSnapshot, key: str, compact: bool =
         trend = core.fetch_financial_history(snap.code, years=4)
         flow = core.fetch_flow(snap.code, days=5)
     health = core.financial_health(snap)
+    latest_label = ""
+    if trend.years:
+        latest_label = f"{trend.years[-1]}년 {'추정' if (trend.estimated and trend.estimated[-1]) else '확정'}"
     st.markdown(f"#### 📊 {snap.name}({snap.code}) · {snap.sector} · "
                 f"{'한국' if snap.market == 'KR' else '미국'}")
     st.caption(f"재무자료 기준 {core.financial_basis_text(snap, trend)} · "
-               f"현재가 기준 {core.price_as_of_text(snap)} · 출처 {trend.source or '-'}")
+               f"현재가 기준 {core.price_as_of_text(snap)} · 출처 {trend.source or '-'}"
+               + (f" · 아래 실적 수치는 {latest_label} 기준" if latest_label else ""))
 
     rev = _last_value(trend, "매출액")
     op = _last_value(trend, "영업이익")
@@ -1328,6 +1332,10 @@ def menu_strategy(rules: core.FilterRules) -> None:
                 "updated": core.now_text()}}, "전략을 저장했습니다."):
             st.rerun()
 
+    if snap.price and plan["stop"] and snap.price <= plan["stop"]:
+        st.warning(f"현재가 {money(snap.price, cur)}이(가) 이미 손절선 {money(plan['stop'], cur)}"
+                   f"(평단 -15%)을 밑돌고 있습니다. 원칙을 지킬지, 실적 회복 근거로 보유할지 정해 두세요.")
+
     st.markdown("**판단 근거**")
     for line in plan["basis"]:
         st.markdown(f"- {line}")
@@ -1776,7 +1784,7 @@ def render_trade_editor(trades: list[dict], ledger: dict) -> None:
     st.markdown("**거래 내역 (매수·매도)**")
     with st.form("add_trade"):
         c1, c2 = st.columns(2)
-        t_date = c1.date_input("일자", value=date.today(), key="tr_date")
+        t_date = c1.date_input("일자", value=date.fromisoformat(core.today_str()), key="tr_date")
         t_side = c2.selectbox("구분", ["매수", "매도"], key="tr_side")
         c3, c4 = st.columns(2)
         t_code = c3.text_input("종목 (이름·코드·티커)", key="tr_code")
@@ -1822,7 +1830,8 @@ def render_trade_editor(trades: list[dict], ledger: dict) -> None:
         target = trades[idx]
         with st.form(f"edit_trade_{idx}"):
             e_date = st.date_input("일자", value=date.fromisoformat(target["date"])
-                                   if target.get("date") else date.today(), key=f"tr_e_date_{idx}")
+                                   if target.get("date") else date.fromisoformat(core.today_str()),
+                                   key=f"tr_e_date_{idx}")
             e_side = st.selectbox("구분", ["매수", "매도"],
                                   index=0 if core._norm_side(target.get("side")) == "매수" else 1,
                                   key=f"tr_e_side_{idx}")
@@ -1852,7 +1861,7 @@ def render_dividend_editor(dividends: list[dict]) -> None:
     st.markdown("**배당 내역**")
     with st.form("add_dividend"):
         c1, c2 = st.columns(2)
-        d_date = c1.date_input("일자", value=date.today(), key="dv_date")
+        d_date = c1.date_input("일자", value=date.fromisoformat(core.today_str()), key="dv_date")
         d_code = c2.text_input("종목 (이름·코드·티커)", key="dv_code")
         c3, c4, c5 = st.columns(3)
         d_gross = c3.number_input("배당금(세전)", min_value=0.0, step=1000.0, value=0.0, key="dv_gross")
@@ -1892,7 +1901,8 @@ def render_dividend_editor(dividends: list[dict]) -> None:
         target = dividends[idx]
         with st.form(f"edit_dividend_{idx}"):
             e_date = st.date_input("일자", value=date.fromisoformat(target["date"])
-                                   if target.get("date") else date.today(), key=f"dv_e_date_{idx}")
+                                   if target.get("date") else date.fromisoformat(core.today_str()),
+                                   key=f"dv_e_date_{idx}")
             e_gross = st.number_input("배당금(세전)", min_value=0.0, step=1000.0,
                                       value=float(core.parse_num(target.get("gross")) or 0),
                                       key=f"dv_e_gross_{idx}")
