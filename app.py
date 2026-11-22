@@ -830,17 +830,21 @@ def macro_dashboard() -> core.MacroBoard:
     st.markdown("#### 🌐 오늘의 시장 지표")
     row1 = macro.items[:6]
     cols = st.columns(len(row1))
+    def delta_of(item):
+        if item.change is None and item.change_pct is None:
+            return None
+        return item.change_text()
+
     for col, item in zip(cols, row1):
         with col:
-            st.metric(item.label, item.value_text(), item.change_text(),
-                      delta_color="normal" if item.ok else "off")
+            st.metric(item.label, item.value_text(), delta_of(item))
             st.caption(item.extra or (item.as_of[:16].replace("T", " ") if item.as_of else "확인 불가"))
     row2 = macro.items[6:]
     if row2:
         cols2 = st.columns(len(row2))
         for col, item in zip(cols2, row2):
             with col:
-                st.metric(item.label, item.value_text(), item.change_text())
+                st.metric(item.label, item.value_text(), delta_of(item))
                 st.caption(item.as_of[:16].replace("T", " ") if item.as_of else "확인 불가")
 
     if macro.flows:
