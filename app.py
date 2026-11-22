@@ -1,7 +1,11 @@
-"""📈 가치투자 스튜디오 — 보유 점검 · 저평가 우량주 발굴 · 종목 분석 · 추천 추적.
+"""📈 가치투자 스튜디오 v2 — 보유 점검 · 저평가 우량주 발굴 · 이슈/종목 분석 · 추천 추적.
 
 동철님의 투자 원칙("저가 우량주를 찾고, 투자금을 잃지 않는 것")을 기준으로
 보유 종목과 후보 종목을 같은 잣대로 점검하는 Streamlit 앱.
+
+v2 추가: 6개월/1년 주가 차트(20·60일선) · 3~5년 실적 추이 · PER/PBR/DCF 3방식 밸류에이션과
+4단계 대응 구간 · 거시/산업 지표판 · 이슈→내 종목 영향 해석 · 근거(URL·시각) 붙은 뉴스 분석 ·
+종목명 자동 검색 · 400종목 유니버스 스캔.
 
 실행:  streamlit run app.py
 배포:  Streamlit Community Cloud + 구글 시트(Apps Script 웹 앱) 연동
@@ -23,7 +27,7 @@ except Exception:
 
 CSS = """
 <style>
-  .block-container {padding-top: 1.1rem; max-width: 1250px;}
+  .block-container {padding-top: 1.1rem; max-width: 1320px;}
   .vi-header {
     background: linear-gradient(115deg, #0b1b34 0%, #14294b 55%, #1d3f74 100%);
     border-radius: 16px; padding: 22px 26px 18px 26px; margin-bottom: 14px;
@@ -54,6 +58,13 @@ CSS = """
   .vi-fail {background: #fdeceb; color: #9c1c16;}
   .vi-wait {background: #fdf4e0; color: #8a6205;}
   .vi-note {font-size: .82rem; color: #5b6b85;}
+  .vi-tier {width: 100%; border-collapse: collapse; font-size: .86rem;}
+  .vi-tier th, .vi-tier td {border-bottom: 1px solid #e3e8f0; padding: 7px 9px; text-align: left;}
+  .vi-tier tr.now {background: #eef4ff; font-weight: 700;}
+  .vi-news {font-size: .84rem; margin-bottom: .45rem; line-height: 1.35;}
+  .vi-pos {background: #e5f6ee; color: #0d6b4c; border-radius: 6px; padding: 1px 6px; font-size: .76rem;}
+  .vi-neg {background: #fdeceb; color: #9c1c16; border-radius: 6px; padding: 1px 6px; font-size: .76rem;}
+  .vi-mid {background: #eef1f6; color: #445; border-radius: 6px; padding: 1px 6px; font-size: .76rem;}
   a {text-decoration: none;}
 </style>
 """
@@ -62,11 +73,14 @@ st.markdown(CSS, unsafe_allow_html=True)
 
 # ------------------------------------------------------------- 공통 도우미 ----
 def header() -> None:
+    counts = core.universe_size()
     st.markdown(
         '<div class="vi-header">'
-        "<h1>📈 가치투자 스튜디오</h1>"
-        "<p>저가 우량주를 찾고, 투자금을 잃지 않는 것 — 보유 점검 · 가치함정 필터 · 종목 분석 · 추천 추적</p>"
-        f'<span class="tag">기준일 {core.today_str()} · 데이터 네이버금융·야후파이낸스·뉴스RSS</span>'
+        "<h1>📈 가치투자 스튜디오 <span style='font-size:1rem;opacity:.75'>v2</span></h1>"
+        "<p>저가 우량주를 찾고, 투자금을 잃지 않는 것 — 보유 점검 · 가치함정 필터 · 이슈/종목 분석 · 추천 추적</p>"
+        f'<span class="tag">기준일 {core.today_str()} · 유니버스 {len(core.UNIVERSE)}종목'
+        f"(코스피 {counts.get('KOSPI', 0)}·코스닥 {counts.get('KOSDAQ', 0)}·미국 {counts.get('US', 0)})"
+        " · 네이버금융·네이버뉴스·구글뉴스RSS·뉴욕연준</span>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -193,6 +207,12 @@ def sidebar(rules: core.FilterRules) -> core.FilterRules:
         st.caption(core.storage_target())
         if st.button("🔄 시트·시세 새로고침", key="refresh_all", width="stretch"):
             core.clear_cache()
+            for fn in (core.fetch_macro, core.fetch_sector_pulse, core.fetch_price_history,
+                       core.fetch_financial_history, core.fetch_flow, core.fetch_news_digest):
+                try:
+                    fn.cache_clear()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
             for key in ("holdings", "picks", "scan_rows", "analysis"):
                 st.session_state[key] = None
             st.rerun()
@@ -220,12 +240,12 @@ def sidebar(rules: core.FilterRules) -> core.FilterRules:
 
         st.divider()
         if core.ai_available():
-            st.success(f"🤖 AI 심층 리포트: {core.ai_config()[0]} 연결됨")
+            st.success(f"🤖 AI 해설: {core.ai_config()[0]} 연결됨")
         else:
-            st.info("🤖 AI 심층 리포트: 키 없음")
+            st.info("🤖 AI 해설: 키 없음")
             st.caption("OPENAI_API_KEY · GEMINI_API_KEY · OPENROUTER_API_KEY 중 하나를 "
-                       "Streamlit Secrets(또는 환경변수)에 넣으면 3️⃣ 탭에서 AI 리포트가 추가됩니다. "
-                       "키가 없어도 정량·시나리오 분석은 100% 동작합니다.")
+                       "Streamlit Secrets(또는 환경변수)에 넣으면 AI 해설이 추가됩니다. "
+                       "키가 없어도 차트·밸류에이션·이슈 해석은 100% 동작합니다.")
 
         st.divider()
         st.caption("⚠️ 정보 제공용이며 투자 자문이 아닙니다. 최종 매매 판단과 책임은 본인에게 있습니다.")
@@ -240,6 +260,281 @@ def sidebar(rules: core.FilterRules) -> core.FilterRules:
         require_op_profit=bool(st.session_state.get("f_op", rules.require_op_profit)),
         require_ocf=bool(st.session_state.get("f_ocf", rules.require_ocf)),
     )
+
+
+# ------------------------------------------------------------- 차트 도우미 ----
+PRICE_COLOR = "#1f4e9c"
+MA20_COLOR = "#e08a00"
+MA60_COLOR = "#8a4fbf"
+
+
+def price_chart(hist: core.PriceHistory, currency: str, months: int = 12, height: int = 320):
+    """6개월/1년 주가 + 20일·60일 이동평균 (인터랙티브)."""
+    import altair as alt
+    window = hist.window(months)
+    rows = window.to_rows()
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    long = df.melt(id_vars=["날짜"], value_vars=["종가", "20일선", "60일선"],
+                   var_name="구분", value_name="가격").dropna()
+    price_scale = alt.Scale(zero=False)
+    base = alt.Chart(long).encode(
+        x=alt.X("날짜:T", title="날짜"),
+        y=alt.Y("가격:Q", title=f"주가({'원' if currency == 'KRW' else 'USD'})", scale=price_scale),
+        color=alt.Color("구분:N", title=None,
+                        scale=alt.Scale(domain=["종가", "20일선", "60일선"],
+                                        range=[PRICE_COLOR, MA20_COLOR, MA60_COLOR])),
+        tooltip=[alt.Tooltip("날짜:T", title="날짜"),
+                 alt.Tooltip("구분:N", title="구분"),
+                 alt.Tooltip("가격:Q", title="가격", format=",.2f")],
+    )
+    line = base.mark_line(strokeWidth=2).transform_filter(alt.datum["구분"] == "종가")
+    ma = base.mark_line(strokeWidth=1.2, opacity=0.85).transform_filter(alt.datum["구분"] != "종가")
+    chart = (line + ma).properties(height=height).interactive()
+    return chart
+
+
+def trend_chart(rows: list[dict], field: str, title: str, unit: str = "",
+                kind: str = "bar", color: str = PRICE_COLOR, height: int = 190):
+    """연도별 재무 추이 막대/선 차트."""
+    import altair as alt
+    data = [{"연도": r.get("연도"), "값": r.get(field)} for r in rows if r.get(field) is not None]
+    if not data:
+        return None
+    df = pd.DataFrame(data)
+    if kind == "bar":
+        mark = alt.Chart(df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+            x=alt.X("연도:N", title=None, sort=None),
+            y=alt.Y("값:Q", title=unit),
+            color=alt.condition(alt.datum["값"] >= 0, alt.value(color), alt.value("#b3261e")),
+            tooltip=[alt.Tooltip("연도:N"), alt.Tooltip("값:Q", format=",.2f")],
+        )
+    else:
+        mark = alt.Chart(df).mark_line(point=True, strokeWidth=2, color=color).encode(
+            x=alt.X("연도:N", title=None, sort=None),
+            y=alt.Y("값:Q", title=unit, scale=alt.Scale(zero=False)),
+            tooltip=[alt.Tooltip("연도:N"), alt.Tooltip("값:Q", format=",.2f")],
+        )
+    return mark.properties(height=height, title=alt.TitleParams(title, fontSize=12, anchor="start"))
+
+
+def show_chart(chart) -> None:
+    if chart is None:
+        st.caption("데이터 없음")
+        return
+    st.altair_chart(chart, width="stretch")
+
+
+# --------------------------------------------------------- 밸류에이션 블록 ----
+def valuation_block(snap: core.StockSnapshot, val: core.Valuation) -> None:
+    cur = val.currency
+    st.markdown("#### 💰 적정가 — 3가지 방식")
+    rows = []
+    for m in val.methods:
+        rows.append({
+            "방식": m.name,
+            "적정가": money(m.value, cur) if m.value else "계산 불가",
+            "가중치": f"{m.weight:.0%}" if m.value else "-",
+            "근거": m.basis,
+            "비고": m.note,
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.caption(val.note + " · " + " / ".join(val.assumptions))
+
+    if val.fair:
+        st.markdown(f"**종합 적정가 {money(val.fair, cur)}** "
+                    f"(현재가 {money(snap.price, cur)} · 밴드 {money(val.low, cur)}~{money(val.high, cur)})")
+        table_rows = []
+        for r in val.rows:
+            table_rows.append(
+                f"<tr class='{'now' if r['지금'] else ''}'>"
+                f"<td>{'▶ ' if r['지금'] else ''}{r['구간']}</td>"
+                f"<td>{r['가격대']}</td><td>{r['판단']}</td></tr>")
+        st.markdown(
+            "<table class='vi-tier'><thead><tr><th>대응 구간</th><th>가격대</th><th>의미</th></tr></thead>"
+            f"<tbody>{''.join(table_rows)}</tbody></table>",
+            unsafe_allow_html=True)
+        st.caption(f"현재가 기준 판단: **{val.tier}** — 하단은 적정가 -10%, 상단은 +15% 구간입니다. "
+                   "DCF는 영업현금흐름(없으면 순이익)을 기준으로 한 보수적 가정입니다.")
+    else:
+        st.info(val.note)
+
+
+# ------------------------------------------------------------- 수급·배당 ----
+def flow_block(flow: core.FlowSummary, currency: str = "KRW") -> None:
+    st.markdown(f"**수급** · {flow.tag()}")
+    if not flow.available:
+        st.caption(flow.note or "수급 데이터 없음")
+        return
+    df = pd.DataFrame(flow.rows)
+    st.dataframe(df, hide_index=True, width="stretch",
+                 column_config={
+                     "외국인": st.column_config.NumberColumn(format="%,d"),
+                     "기관": st.column_config.NumberColumn(format="%,d"),
+                     "개인": st.column_config.NumberColumn(format="%,d"),
+                     "종가": st.column_config.NumberColumn(format="%.0f"),
+                 })
+    st.caption(f"{flow.text()}"
+               + (f" · 외국인 보유율 {flow.foreign_hold_ratio:.2f}%" if flow.foreign_hold_ratio else ""))
+
+
+def dividend_block(snap: core.StockSnapshot, hist: core.FinancialHistory | None = None) -> None:
+    st.markdown("**배당**")
+    cols = st.columns(3)
+    cols[0].metric("배당수익률", "-" if snap.dividend_yield is None else f"{snap.dividend_yield:.2f}%")
+    cols[1].metric("주당배당금", money(snap.dps, snap.currency) if snap.dps else "-")
+    cols[2].metric("기준 연도", snap.dividend_year or "-")
+    if hist and hist.series.get("주당배당금") and any(v for v in hist.series["주당배당금"]):
+        rows = hist.series_rows(["주당배당금", "배당수익률"])
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    else:
+        st.caption("연도별 배당 이력은 데이터 제공처에 없으면 표시하지 않습니다.")
+
+
+def news_digest_block(digest: core.NewsDigest, name: str = "", market_news: bool = False) -> None:
+    """뉴스·공시 — 실제 URL과 게시 시각만 표시한다(없는 기사는 만들지 않음)."""
+    if not digest.items:
+        st.caption(digest.note or "뉴스를 가져오지 못했습니다.")
+        return
+    counts = digest.counts()
+    st.caption(f"수집 {len(digest.items)}건 · 🟢 호재 {counts['🟢 호재']} · 🔴 악재 {counts['🔴 악재']} · "
+               f"⚪ 중립 {counts['⚪ 중립']} · 기준 {digest.generated_at}")
+    groups = digest.by_category()
+    labels = [c for c in core.CATEGORY_ORDER if c in groups]
+    for category in labels:
+        st.markdown(f"**{category}**")
+        for item in groups[category][:6]:
+            cls = {"🟢 호재": "vi-pos", "🔴 악재": "vi-neg"}.get(item.sentiment, "vi-mid")
+            st.markdown(
+                f"<div class='vi-news'><span class='{cls}'>{item.sentiment}</span> "
+                f"<a href='{item.link}' target='_blank'>{item.title}</a><br>"
+                f"<span class='vi-note'>{item.source} · 게시 {item.published}</span></div>",
+                unsafe_allow_html=True)
+
+
+# ------------------------------------------------------- 종목 상세 렌더링 ----
+def render_detail(snap: core.StockSnapshot, rules: core.FilterRules, key: str,
+                  avg_price: float | None = None, quotes: dict | None = None,
+                  show_news: bool = True) -> None:
+    """한 종목의 상세 — 시세·시나리오·밸류에이션·추이·수급·배당·뉴스."""
+    filt = core.run_filter(snap, rules)
+    with st.spinner(f"{snap.name or snap.code} 상세 데이터를 불러오는 중..."):
+        hist = core.fetch_price_history(snap.code, months=12)
+        trend = core.fetch_financial_history(snap.code, years=4)
+        flow = core.fetch_flow(snap.code)
+        val = core.valuate(snap, trend)
+        digest = core.fetch_news_digest(snap.name or snap.code, code=snap.code if snap.market == "KR" else "",
+                                        limit=12) if show_news else core.NewsDigest()
+        scn = core.build_scenarios(snap, avg_price=avg_price, valuation=val)
+
+    stats = hist.stats()
+    st.markdown(f"### {snap.name}({snap.code}) · {snap.sector} · "
+                f"{'한국' if snap.market == 'KR' else '미국'}")
+    m = st.columns(5)
+    m[0].metric("현재가", money(snap.price, snap.currency), pct_text(snap.change_pct))
+    m[1].metric("PER / PBR", f"{value_or(snap.per)} / {value_or(snap.pbr)}")
+    m[2].metric("ROE / 부채비율", f"{value_or(snap.roe, '{:.1f}%')} / {value_or(snap.debt_ratio, '{:.1f}%')}")
+    m[3].metric("배당수익률", "-" if snap.dividend_yield is None else f"{snap.dividend_yield:.2f}%",
+                f"DPS {money(snap.dps, snap.currency) if snap.dps else '-'}", delta_color="off")
+    m[4].metric("가치점수", f"{filt['score']}점", filt["verdict"], delta_color="off")
+    if snap.as_of:
+        st.caption(f"시세 기준 {snap.as_of} · 출처 {', '.join(snap.sources) or '-'}")
+
+    st.markdown("#### 🟢🟡🔴 3단 시나리오")
+    scenario_cards(scn)
+
+    valuation_block(snap, val)
+
+    st.markdown("#### 📈 주가 흐름")
+    if hist.closes:
+        c1, c2 = st.columns([3, 1])
+        with c2:
+            period = st.radio("기간", ["6개월", "1년"], index=1, horizontal=True,
+                              key=f"{key}_period")
+        months = 6 if period == "6개월" else 12
+        show_chart(price_chart(hist, snap.currency, months=months))
+        s = stats or {}
+        k = st.columns(4)
+        k[0].metric("6개월 수익률", pct_text(s.get("return_6m")))
+        k[1].metric("1년 수익률", pct_text(s.get("return_1y")))
+        k[2].metric("20일선", money(s.get("ma20"), snap.currency))
+        k[3].metric("60일선", money(s.get("ma60"), snap.currency))
+        if s.get("position_pct") is not None:
+            pos = max(0.0, min(100.0, s["position_pct"]))
+            st.progress(pos / 100,
+                        text=f"52주 레인지 {money(s.get('low52'), snap.currency)} ~ "
+                             f"{money(s.get('high52'), snap.currency)} · 현재 {pos:.0f}% 위치")
+        if hist.note:
+            st.caption(hist.note)
+    else:
+        st.caption(hist.note or "주가 흐름 데이터 없음")
+
+    st.markdown(f"#### 📊 3~5년 실적·재무 추이 ({trend.source or '데이터 없음'})")
+    if trend.available():
+        rows = trend.series_rows()
+        unit = trend.unit
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            show_chart(trend_chart(rows, "매출액", "매출액", unit))
+        with g2:
+            show_chart(trend_chart(rows, "영업이익", "영업이익", unit))
+        with g3:
+            show_chart(trend_chart(rows, "순이익", "순이익", unit))
+        g4, g5, g6 = st.columns(3)
+        with g4:
+            show_chart(trend_chart(rows, "영업이익률", "영업이익률", "%", kind="line"))
+        with g5:
+            show_chart(trend_chart(rows, "ROE", "ROE", "%", kind="line", color="#12805c"))
+        with g6:
+            show_chart(trend_chart(rows, "부채비율", "부채비율", "%", kind="line", color="#b3261e"))
+        g7, g8, g9 = st.columns(3)
+        with g7:
+            show_chart(trend_chart(rows, "PER", "PER 추이", "배", kind="line"))
+        with g8:
+            show_chart(trend_chart(rows, "PBR", "PBR 추이", "배", kind="line", color="#8a4fbf"))
+        with g9:
+            show_chart(trend_chart(rows, "현금흐름", "영업현금흐름(가능 시)", unit))
+        g10, g11, g12 = st.columns(3)
+        with g10:
+            show_chart(trend_chart(rows, "EPS", "EPS", snap.currency, kind="line"))
+        with g11:
+            show_chart(trend_chart(rows, "BPS", "BPS", snap.currency, kind="line"))
+        with g12:
+            show_chart(trend_chart(rows, "주당배당금", "주당배당금(DPS)", snap.currency))
+        with st.expander("연도별 표로 보기"):
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        if trend.note:
+            st.caption(trend.note)
+        est = [y for i, y in enumerate(trend.years)
+               if i < len(trend.estimated) and trend.estimated[i]]
+        if est:
+            st.caption(f"{', '.join(est)}년은 증권가 추정치(컨센서스)입니다. 나머지는 확정 실적입니다.")
+    else:
+        st.caption(trend.note or "재무 추이 데이터 없음")
+        with st.expander("현재 지표만 보기"):
+            health_table(snap)
+
+    col_left, col_right = st.columns(2)
+    with col_left:
+        st.markdown("#### 🧾 수급")
+        flow_block(flow, snap.currency)
+    with col_right:
+        st.markdown("#### 💵 배당")
+        dividend_block(snap, trend)
+
+    if show_news:
+        st.markdown("#### 📰 뉴스·공시 자동 분석")
+        news_digest_block(digest, snap.name)
+        for line in core.news_impact_lines(digest, snap.sector, snap.name):
+            st.caption(line)
+
+    b1, b2 = st.columns([1, 2])
+    with b1:
+        if st.button("📈 이 종목을 추천 추적에 등록", key=f"{key}_register"):
+            register_pick(snap, scn, f"상세분석 · 가치점수 {filt['score']}점 · {filt['reason']}")
+    with b2:
+        st.caption("등록 시 현재가·목표가·경계선이 저장되어 이후 수익률을 자동 추적합니다.")
 
 
 # ------------------------------------------------- 1) 보유 종목 & 시나리오 점검 ----
@@ -295,6 +590,7 @@ def tab_portfolio(rules: core.FilterRules) -> None:
             "현재가": snap.price, "평가금액(원)": value_krw, "평가손익(원)": profit,
             "수익률(%)": ret, "비중(%)": None, "PER": snap.per, "PBR": snap.pbr,
             "부채비율(%)": snap.debt_ratio, "ROE(%)": snap.roe,
+            "배당수익률(%)": snap.dividend_yield, "DPS": snap.dps,
             "적정가": scn.get("fair"), "신호": signal,
         })
 
@@ -304,14 +600,17 @@ def tab_portfolio(rules: core.FilterRules) -> None:
 
     profit_total = total_value - total_cost
     ret_total = (profit_total / total_cost * 100) if total_cost else 0.0
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("총 매수금액", f"{total_cost:,.0f}원")
     m2.metric("총 평가금액", f"{total_value:,.0f}원")
     m3.metric("평가손익", f"{profit_total:+,.0f}원", f"{ret_total:+.1f}%")
     m4.metric("보유 종목", f"{len(holdings)}종목")
+    div_avg = [r["배당수익률(%)"] for r in rows if r["배당수익률(%)"] is not None]
+    m5.metric("평균 배당수익률", f"{sum(div_avg) / len(div_avg):.2f}%" if div_avg else "-")
 
-    st.dataframe(
+    table_state = st.dataframe(
         pd.DataFrame(rows), hide_index=True, width="stretch",
+        on_select="rerun", selection_mode="single-row", key="holdings_table",
         column_config={
             "평단가": st.column_config.NumberColumn(format="%.0f"),
             "현재가": st.column_config.NumberColumn(format="%.2f"),
@@ -323,38 +622,33 @@ def tab_portfolio(rules: core.FilterRules) -> None:
             "PBR": st.column_config.NumberColumn(format="%.2f"),
             "부채비율(%)": st.column_config.NumberColumn(format="%.1f"),
             "ROE(%)": st.column_config.NumberColumn(format="%.1f"),
+            "배당수익률(%)": st.column_config.NumberColumn(format="%.2f"),
+            "DPS": st.column_config.NumberColumn(format="%.0f"),
             "적정가": st.column_config.NumberColumn(format="%.0f"),
         },
     )
     st.caption("평가금액·손익은 원화 환산 기준입니다(해외 종목은 원/달러 환율 적용). "
-               "적정가 = (BPS×1배 + EPS×12배) 평균.")
+               "적정가는 PER·PBR·DCF 세 방식을 섹터 특성에 맞게 가중한 값입니다.")
 
-    st.markdown("#### 종목별 시나리오와 근거")
-    for h, snap, scn, ret in details:
-        filt = core.run_filter(snap, rules)
-        badge = {"통과": "vi-pass", "탈락": "vi-fail"}.get(filt["verdict"], "vi-wait")
-        label = (f"{snap.name or h['name']} · {money(snap.price, snap.currency)} "
-                 f"({pct_text(snap.change_pct)}) · 수익률 {pct_text(ret)} · 가치점수 {filt['score']}점")
-        with st.expander(label, expanded=False):
+    st.divider()
+    st.markdown("#### 🔍 종목 상세 (표에서 행을 클릭하거나 아래에서 선택)")
+    clicked = list(getattr(getattr(table_state, "selection", None), "rows", []) or [])
+    if clicked:
+        st.session_state["holding_detail_pick"] = int(clicked[0])
+    labels = [f"{h.get('name') or h['code']} ({h['code']})" for h in holdings]
+    pick = st.selectbox("상세 볼 종목", range(len(holdings)), format_func=lambda i: labels[i],
+                        key="holding_detail_pick")
+    h = holdings[pick]
+    snap = by_code.get(core.clean_code(h["code"])) or core.StockSnapshot(code=h["code"])
+    render_detail(snap, rules, key=f"hold_{snap.code}", avg_price=float(h.get("avg_price") or 0) or None)
+
+    st.divider()
+    with st.expander("🧭 보유 종목 한눈 요약 (시나리오 기준)", expanded=False):
+        for h, snap, scn, ret in details:
             st.markdown(
-                f"<span class='vi-pill {badge}'>{filt['verdict']}</span>"
-                f"<span class='vi-note'>평단 {money(h.get('avg_price'), snap.currency)} · "
-                f"PER {value_or(snap.per)} · PBR {value_or(snap.pbr)} · "
-                f"ROE {value_or(snap.roe, '{:.1f}%')} · 부채비율 {value_or(snap.debt_ratio, '{:.1f}%')} · "
-                f"출처 {', '.join(snap.sources) or '-'}</span>",
-                unsafe_allow_html=True)
-            scenario_cards(scn)
-            left, right = st.columns(2)
-            with left:
-                st.markdown("**재무 건전성**")
-                health_table(snap)
-                if filt.get("note"):
-                    st.caption(filt["note"])
-            with right:
-                st.markdown("**관련 최신 뉴스**")
-                news_block(core.fetch_news(snap.name or h["name"], 4))
-            if snap.notes:
-                st.caption("데이터 참고: " + " · ".join(dict.fromkeys(snap.notes)))
+                f"- **{snap.name or h['name']}** · 현재 {money(snap.price, snap.currency)} · "
+                f"수익률 {pct_text(ret)} · 상승 {scn['상승']['range_text']} / "
+                f"기본 {scn['기본']['range_text']} / 경계 {scn['경계']['range_text']}")
 
     render_holding_manager(holdings)
 
@@ -363,25 +657,29 @@ def render_holding_manager(holdings: list[dict]) -> None:
     with st.expander("➕ 보유 종목 관리 (추가 · 수정 · 삭제)", expanded=False):
         add_col, edit_col = st.columns(2)
         with add_col:
-            st.markdown("**종목 추가**")
+            st.markdown("**종목 추가** (종목명·티커·코드 모두 가능)")
             with st.form("add_holding"):
-                code = st.text_input("종목코드 (예: 034020, AAPL)", key="add_code")
-                name = st.text_input("종목명 (선택)", key="add_name")
+                code = st.text_input("종목 (예: HPSP, 삼성전자, 034020, AAPL)", key="add_code")
                 qty = st.number_input("수량", min_value=0.0, step=1.0, value=1.0, key="add_qty")
                 avg = st.number_input("평단가", min_value=0.0, step=100.0, value=0.0, key="add_avg")
                 memo = st.text_input("메모 (선택)", key="add_memo")
                 if st.form_submit_button("추가", width="stretch"):
                     if not code.strip():
-                        st.error("종목코드를 입력하세요.")
+                        st.error("종목을 입력하세요.")
                     elif qty <= 0 or avg <= 0:
                         st.error("수량과 평단가는 0보다 커야 합니다.")
                     else:
-                        new = {"code": core.clean_code(code), "name": name.strip(),
-                               "qty": qty, "avg_price": avg, "memo": memo.strip()}
-                        others = [h for h in holdings if core.clean_code(h["code"]) != new["code"]]
-                        if persist("holdings", others + [new],
-                                   f"{new['name'] or new['code']} 종목을 저장했습니다."):
-                            st.rerun()
+                        found = core.search_stocks(code, limit=1)
+                        if not found:
+                            st.error(f"'{code}' 종목을 찾지 못했습니다.")
+                        else:
+                            item = found[0]
+                            new = {"code": item["code"], "name": item["name"],
+                                   "qty": qty, "avg_price": avg, "memo": memo.strip()}
+                            others = [h for h in holdings if core.clean_code(h["code"]) != new["code"]]
+                            if persist("holdings", others + [new],
+                                       f"{new['name'] or new['code']}({new['code']}) 종목을 저장했습니다."):
+                                st.rerun()
 
         with edit_col:
             st.markdown("**수정 / 삭제**")
@@ -414,38 +712,54 @@ def render_holding_manager(holdings: list[dict]) -> None:
 # -------------------------------------------- 2) 저평가 우량주 발굴 (가치함정 필터) ----
 def tab_screener(rules: core.FilterRules) -> None:
     st.subheader("🔍 저평가 우량주 발굴 (가치함정 필터)")
-    st.caption("관심 섹터 대표 종목과 직접 입력 종목을 같은 기준으로 훑습니다. "
-               "통과/탈락 사유와 종합 가치점수(0~100)를 함께 보여줍니다. "
-               "현재 기준: " + rules.summary())
+    st.caption(f"유니버스 {len(core.UNIVERSE)}종목을 같은 기준으로 훑습니다. "
+               f"통과/탈락 사유와 종합 가치점수(0~100)를 함께 보여줍니다. 현재 기준: {rules.summary()}")
 
-    sector_col, extra_col = st.columns([1, 1.4])
-    with sector_col:
-        sectors = st.multiselect(
-            "스캔할 섹터", core.SECTOR_ORDER,
-            default=["원전·에너지", "건설", "반도체", "바이오", "금융", "제조·철강"],
-            key="scan_sectors")
-    with extra_col:
-        extra = st.text_input("직접 입력 종목 (쉼표로 구분: 코드·종목명·미국 티커)",
-                              placeholder="예: 000660, 클래시스, NVDA", key="scan_extra")
+    f1, f2, f3 = st.columns([1.1, 1.6, 1])
+    with f1:
+        markets = st.multiselect("시장", core.MARKET_LABELS[1:],
+                                 default=["코스피", "코스닥", "미국"], key="scan_markets")
+    with f2:
+        sectors = st.multiselect("섹터 (비우면 전체)", core.SECTOR_ORDER, default=[], key="scan_sectors")
+    with f3:
+        scope = st.radio("스캔 범위", ["빠른 스캔(150)", "전체 스캔", "상위 60"], index=0, key="scan_scope")
+
+    extra = st.text_input("직접 입력 종목 추가 (쉼표로 구분: 이름·코드·티커)",
+                          placeholder="예: HPSP, 클래시스, 엔비디아", key="scan_extra")
 
     if st.button("🔍 스캔 실행", key="scan_btn", type="primary"):
-        items = core.universe_items(sectors=sectors or None)
-        if extra.strip():
-            extra_codes = [c.strip() for c in extra.split(",") if c.strip()]
-            known = {i["code"] for i in items}
-            for raw in extra_codes:
-                resolved = core.resolve_query(raw) or {"code": core.clean_code(raw), "name": "", "market": None}
-                code = resolved["code"]
-                if code not in known:
-                    items.append({"code": code, "name": resolved.get("name", ""),
-                                  "sector": "기타", "market": resolved.get("market") or core.detect_market(code)})
-                    known.add(code)
-        with st.spinner(f"{len(items)}개 종목 스캔 중... (캐시에 없으면 20~40초)"):
-            st.session_state["scan_rows"] = core.scan_universe(items, rules)
+        limit = {"빠른 스캔(150)": 150, "전체 스캔": None, "상위 60": 60}[scope]
+        items = core.universe_items(sectors=sectors or None, markets=markets or None, limit=limit)
+        known = {i["code"] for i in items}
+        for raw in [c.strip() for c in extra.split(",") if c.strip()]:
+            found = core.search_stocks(raw, limit=1)
+            if not found:
+                st.warning(f"'{raw}' 종목을 찾지 못했습니다.")
+                continue
+            item = found[0]
+            if item["code"] not in known:
+                sector = item.get("sector") or core.search_sector(item["code"]) or "기타"
+                items.append({"code": item["code"], "name": item["name"],
+                              "sector": sector, "market": item.get("board") or "US"})
+                known.add(item["code"])
+        bar = st.progress(0.0, text=f"{len(items)}개 종목 스캔 준비...")
+
+        def on_progress(done: int, total: int) -> None:
+            try:
+                bar.progress(min(1.0, done / max(1, total)),
+                             text=f"{done}/{total} 종목 조회 중...")
+            except Exception:
+                pass
+
+        rows = core.scan_universe(items, rules, workers=10, progress=on_progress)
+        bar.empty()
+        st.session_state["scan_rows"] = rows
+        st.session_state["scan_meta"] = {"markets": markets, "sectors": sectors, "scope": scope}
 
     rows = st.session_state.get("scan_rows")
     if not rows:
-        st.info("'🔍 스캔 실행'을 누르면 후보 종목을 훑어 통과 종목과 점수를 보여줍니다.")
+        st.info("'🔍 스캔 실행'을 누르면 후보 종목을 훑어 통과 종목과 점수를 보여줍니다. "
+                "150종목 기준 대략 30~60초 걸립니다.")
         return
 
     passed = [r for r in rows if r["filter"]["verdict"] == "통과"]
@@ -463,154 +777,203 @@ def tab_screener(rules: core.FilterRules) -> None:
         table.append({
             "판정": f["verdict"], "종목": s.name or s.code, "코드": s.code, "섹터": s.sector,
             "현재가": s.price, "PER": s.per, "PBR": s.pbr, "부채비율(%)": s.debt_ratio,
-            "ROE(%)": s.roe, "가치점수": f["score"], "사유": f["reason"],
+            "ROE(%)": s.roe, "배당수익률(%)": s.dividend_yield, "가치점수": f["score"], "사유": f["reason"],
         })
-    st.dataframe(
-        pd.DataFrame(table), hide_index=True, width="stretch", height=430,
+    df = pd.DataFrame(table)
+    scan_state = st.dataframe(
+        df, hide_index=True, width="stretch", height=420,
+        on_select="rerun", selection_mode="single-row", key="scan_table",
         column_config={
             "현재가": st.column_config.NumberColumn(format="%.2f"),
             "PER": st.column_config.NumberColumn(format="%.2f"),
             "PBR": st.column_config.NumberColumn(format="%.2f"),
             "부채비율(%)": st.column_config.NumberColumn(format="%.1f"),
             "ROE(%)": st.column_config.NumberColumn(format="%.1f"),
+            "배당수익률(%)": st.column_config.NumberColumn(format="%.2f"),
             "가치점수": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         })
 
-    st.markdown("#### ✅ 기준 통과 종목 — 상세 근거와 추천 등록")
-    if not passed and not wait:
-        st.caption("이번 기준을 모두 통과한 종목이 없습니다. 기준을 조금 완화하거나(예: PBR 1.5→2.0) "
+    candidates = passed + wait
+    st.markdown("#### ✅ 기준 통과·보류 종목 — 상세 보기")
+    if not candidates:
+        st.caption("이번 기준을 모두 통과한 종목이 없습니다. 기준을 조금 완화하거나(PBR 1.5→2.0 등) "
                    "직접 입력으로 종목을 추가해 다시 스캔해 보세요.")
-    for r in passed + wait:
-        s, f = r["snap"], r["filter"]
-        scn = core.build_scenarios(s)
-        with st.expander(f"{s.name or s.code} · 가치점수 {f['score']}점 · {f['verdict']}", expanded=bool(passed) and r is passed[0]):
-            left, right = st.columns([1.15, 1])
-            with left:
-                st.markdown("**필터 판정**")
-                st.table(pd.DataFrame(f["checks"])[["name", "status", "text"]]
-                         .rename(columns={"name": "기준", "status": "판정", "text": "근거"}))
-                st.caption("점수 구성: " + " · ".join(f"{k} {v:.0f}" for k, v in f["score_parts"].items()))
-                if f.get("note"):
-                    st.caption(f["note"])
-            with right:
-                st.markdown("**밸류에이션·재무**")
-                st.write(pd.DataFrame([
-                    ["현재가", money(s.price, s.currency)],
-                    ["PER / PBR", f"{value_or(s.per)} / {value_or(s.pbr)}"],
-                    ["ROE / 부채비율", f"{value_or(s.roe, '{:.1f}%')} / {value_or(s.debt_ratio, '{:.1f}%')}"],
-                    ["영업이익", value_or(s.op_income, "{:,.0f}")],
-                    ["영업현금흐름", value_or(s.ocf, "{:,.0f}")],
-                    ["적정가 / 목표가", f"{money(scn.get('fair'), s.currency)} / {money(scn.get('target'), s.currency)}"],
-                ], columns=["항목", "값"]))
-                st.caption("출처: " + (", ".join(s.sources) or "-"))
-            rationale = f"가치점수 {f['score']}점 · {f['reason']}"
-            if st.button("📈 이 종목을 추천 추적에 등록", key=f"reg_{s.code}"):
-                register_pick(s, scn, rationale)
+        return
+    labels = [f"{r['snap'].name or r['snap'].code} · {r['snap'].sector} · "
+              f"{r['filter']['score']}점 · {r['filter']['verdict']}" for r in candidates]
+    clicked = list(getattr(getattr(scan_state, "selection", None), "rows", []) or [])
+    if clicked and 0 <= int(clicked[0]) < len(rows):
+        code = rows[int(clicked[0])]["snap"].code
+        for idx, cand in enumerate(candidates):
+            if cand["snap"].code == code:
+                st.session_state["scan_detail_pick"] = idx
+                break
+    pick = st.selectbox("상세 볼 종목", range(len(candidates)), format_func=lambda i: labels[i],
+                        key="scan_detail_pick")
+    chosen = candidates[pick]
+    render_detail(chosen["snap"], rules, key=f"scan_{chosen['snap'].code}")
+
+    with st.expander("통과 종목 요약표", expanded=False):
+        st.dataframe(pd.DataFrame([
+            {"종목": r["snap"].name, "코드": r["snap"].code, "섹터": r["snap"].sector,
+             "가치점수": r["filter"]["score"], "사유": r["filter"]["reason"]}
+            for r in candidates]), hide_index=True, width="stretch")
 
 
 # ----------------------------------- 3) 국내외 이슈 & 개별 종목 정밀 분석 ----
-def tab_analysis(rules: core.FilterRules) -> None:
-    st.subheader("🌐 국내외 이슈 & 개별 종목 정밀 분석")
+def macro_dashboard() -> core.MacroBoard:
+    with st.spinner("거시 지표를 불러오는 중..."):
+        macro = core.fetch_macro()
+    st.markdown("#### 🌐 오늘의 시장 지표")
+    row1 = macro.items[:6]
+    cols = st.columns(len(row1))
+    for col, item in zip(cols, row1):
+        with col:
+            st.metric(item.label, item.value_text(), item.change_text(),
+                      delta_color="normal" if item.ok else "off")
+            st.caption(item.extra or (item.as_of[:16].replace("T", " ") if item.as_of else "확인 불가"))
+    row2 = macro.items[6:]
+    if row2:
+        cols2 = st.columns(len(row2))
+        for col, item in zip(cols2, row2):
+            with col:
+                st.metric(item.label, item.value_text(), item.change_text())
+                st.caption(item.as_of[:16].replace("T", " ") if item.as_of else "확인 불가")
 
-    with st.expander("📰 오늘의 시장 이슈와 관심 섹터 영향", expanded=True):
-        if st.button("🔄 뉴스 새로 불러오기", key="news_refresh"):
-            core.fetch_market_news.cache_clear()  # type: ignore[attr-defined]
-        with st.spinner("주요 뉴스를 모으는 중..."):
-            news_map = core.fetch_market_news()
-        impacts = core.sector_impact(news_map)
-        if impacts:
-            st.markdown("**관심 섹터 영향 포인트**")
-            for sector, lines in impacts.items():
-                if sector in ("원전·에너지", "건설", "바이오", "반도체"):
-                    st.markdown(f"- **{sector}**: " + " / ".join(lines))
-        cols = st.columns(2)
-        topics = list(news_map.items())
-        for idx, (topic, items) in enumerate(topics):
-            with cols[idx % 2]:
-                st.markdown(f"**{topic}**")
-                news_block(items, "해당 주제의 최신 뉴스가 없습니다.")
+    if macro.flows:
+        st.markdown("**시장 수급 (단위: 억원)**")
+        st.dataframe(pd.DataFrame([{
+            "시장": f.label, "기준일": f.date, "외국인": f.foreign, "기관": f.institution,
+            "개인": f.personal, "거래대금": core.compact_money(f.trading_value) if f.trading_value else "-",
+        } for f in macro.flows]), hide_index=True, width="stretch")
+    st.caption(f"출처: 네이버 금융 지수·시장지표, 뉴욕 연준(EFFR) · 기준 {macro.as_of or '-'} · "
+               f"지표 {macro.ok_count()}/{len(macro.items)}개 확인")
+    return macro
 
-    st.divider()
-    st.markdown("#### 🔎 개별 종목 정밀 분석")
-    st.caption("한국 종목코드·종목명 또는 미국 티커를 입력하면 재무 건전성 + 밸류에이션 + "
-               "상승/기본/하락 3단 시나리오를 만들어 줍니다. AI 키가 있으면 심층 리포트가 추가됩니다.")
-    with st.form("analyze_form"):
-        c1, c2 = st.columns([3, 1])
-        query = c1.text_input("종목코드 · 종목명 · 티커",
-                              placeholder="예: 034020, 두산에너빌리티, CEG", key="an_query")
-        submitted = c2.form_submit_button("분석하기", width="stretch", type="primary")
-    if submitted:
-        resolved = core.resolve_query(query)
-        if not resolved:
-            st.error("종목을 찾지 못했습니다. 6자리 종목코드나 미국 티커(예: NVDA)로 입력해 주세요.")
-        else:
-            with st.spinner(f"{query} 데이터를 불러오는 중..."):
-                snap = core.fetch_snapshot(resolved["code"], name_hint=resolved.get("name"))
-            st.session_state["analysis"] = {
-                "snapshot": snap,
-                "filter": core.run_filter(snap, rules),
-                "scenarios": core.build_scenarios(snap),
-                "ai": None,
-            }
 
-    data = st.session_state.get("analysis")
-    if not data:
+def sector_pulse_block() -> None:
+    st.markdown("**산업 동향 (업종 대표 종목 등락 평균)**")
+    with st.spinner("산업별 대표 종목을 확인하는 중..."):
+        pulses = core.fetch_sector_pulse()
+    cols = st.columns(len(pulses))
+    for col, pulse in zip(cols, pulses):
+        with col:
+            st.metric(pulse.label, pulse.text() if pulse.change_pct is not None else "확인 불가",
+                      delta_color="off")
+            members = ", ".join(f"{m['name']} {m['change_pct']:+.1f}%" for m in pulse.members[:3])
+            st.caption(members if members else pulse.note)
+
+
+def holdings_news_block(holdings: list[dict]) -> None:
+    st.markdown("#### 📰 보유종목 관련 뉴스 자동분석")
+    if not holdings:
+        st.caption("보유 종목이 등록되면 종목별 뉴스·공시·리포트를 근거(URL·시각)와 함께 모아 분류합니다.")
         return
-    snap: core.StockSnapshot = data["snapshot"]
-    filt = data["filter"]
-    scn = data["scenarios"]
+    st.caption("실제 기사 URL과 피드 게시 시각만 표시합니다. 호재/악재 판단은 제목 키워드 기반 참고용입니다.")
+    for h in holdings[:6]:
+        code = core.clean_code(h["code"])
+        digest = core.fetch_news_digest(h.get("name") or code, code=code if core.detect_market(code) == "KR" else "",
+                                        limit=8)
+        with st.expander(f"{h.get('name') or code} ({code}) · 수집 {len(digest.items)}건", expanded=False):
+            news_digest_block(digest, h.get("name", ""))
+            for line in core.news_impact_lines(digest):
+                st.caption(line)
 
-    st.markdown(f"### {snap.name}({snap.code}) · {snap.sector}")
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("현재가", money(snap.price, snap.currency), pct_text(snap.change_pct))
-    k2.metric("PER / PBR", f"{value_or(snap.per)} / {value_or(snap.pbr)}")
-    k3.metric("ROE", value_or(snap.roe, "{:.1f}%"))
-    k4.metric("가치점수", f"{filt['score']}점", filt["verdict"], delta_color="off")
-    if snap.currency == "USD":
-        st.caption("미국 종목은 달러 기준으로 표시됩니다.")
 
-    left, right = st.columns(2)
-    with left:
-        st.markdown("**재무 건전성**")
-        health_table(snap)
-        if filt.get("note"):
-            st.caption(filt["note"])
-    with right:
-        st.markdown("**밸류에이션·가치함정 판정**")
-        st.table(pd.DataFrame(filt["checks"])[["name", "status", "text"]]
-                 .rename(columns={"name": "기준", "status": "판정", "text": "근거"}))
-        st.caption("점수 구성: " + " · ".join(f"{k} {v:.0f}" for k, v in filt["score_parts"].items()))
+def impact_block(macro: core.MacroBoard, holdings: list[dict]) -> None:
+    st.markdown("#### 🧭 이슈 → 내 종목·관심섹터 영향 해석")
+    st.caption("거시 지표 움직임과 오늘 뉴스 헤드라인을 규칙·키워드로 연결한 해석입니다(AI 키 없이 동작).")
+    with st.spinner("영향을 계산하는 중..."):
+        news_map = core.fetch_market_news()
+        report = core.analyze_impact(macro, news_map, holdings=holdings)
+    counts = report.tag_counts()
+    c = st.columns(4)
+    c[0].metric("분석 종목", f"{len(report.rows)}개")
+    c[1].metric("🟢 호재", f"{counts['🟢 호재']}개")
+    c[2].metric("🔴 주의", f"{counts['🔴 주의']}개")
+    c[3].metric("⚪ 중립", f"{counts['⚪ 중립']}개")
 
-    st.markdown("#### 3단 시나리오 대응 기준")
-    scenario_cards(scn)
+    if report.sectors:
+        st.dataframe(pd.DataFrame([{
+            "섹터": s.sector, "판단": s.tag, "점수": round(s.score, 1), "종목 수": s.holdings,
+            "핵심 근거": " / ".join(s.reasons[:2]),
+        } for s in report.sectors]), hide_index=True, width="stretch")
 
-    b1, b2 = st.columns([1, 1])
-    with b1:
-        if st.button("📈 이 종목을 추천 추적에 등록", key="analysis_register"):
-            register_pick(snap, scn, f"정밀분석 · 가치점수 {filt['score']}점 · {filt['reason']}")
-    with b2:
-        st.caption("등록 시 현재가·목표가·경계선이 함께 저장되어 이후 수익률을 자동 추적합니다.")
+    for row in report.rows[:12]:
+        with st.expander(f"{row.tag} {row.name} ({row.code}) · {row.sector} · 점수 {row.score:+.1f}",
+                         expanded=False):
+            for reason in row.reasons[:6]:
+                st.markdown(f"- {reason}")
+            if row.news:
+                st.caption("관련 헤드라인: " + " / ".join(n.get("title", "") for n in row.news))
 
-    st.markdown("**관련 뉴스**")
-    news_block(core.fetch_news(snap.name or snap.code, 5))
+    st.markdown("**시장 요약**")
+    for line in report.brief:
+        st.markdown(f"- {line}")
 
-    st.divider()
-    st.markdown("#### 🤖 AI 심층 리포트")
+    st.markdown("**🤖 AI 해설 (선택)**")
     if not core.ai_available():
-        st.info("AI 키가 설정되지 않아 정량·시나리오 분석만 제공합니다. "
-                "Streamlit Secrets에 OPENAI_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY 중 하나를 "
-                "넣으면 이 자리에 AI 심층 리포트가 생성됩니다.")
+        st.caption("AI 키가 없어 규칙 기반 해석만 표시합니다. 키를 넣으면 이 자리에 문장형 해설이 추가됩니다.")
     else:
-        if st.button("AI 리포트 생성", key="ai_btn"):
-            with st.spinner("AI가 리포트를 작성하는 중..."):
-                text, err = core.generate_ai_report(snap, scn, filt)
-            data["ai"] = (text, err)
-        if data.get("ai"):
-            text, err = data["ai"]
+        if st.button("AI 해설 생성", key="impact_ai"):
+            with st.spinner("AI가 해설을 작성하는 중..."):
+                text, err = core.generate_ai_text(core.build_impact_prompt(report, macro))
             if text:
                 st.markdown(text)
             else:
                 st.error(err)
+    return report
+
+
+def tab_analysis(rules: core.FilterRules) -> None:
+    st.subheader("🌐 이슈 & 종목 분석")
+    macro = macro_dashboard()
+    st.divider()
+    sector_pulse_block()
+    st.divider()
+    holdings = load_store("holdings")
+    impact_block(macro, holdings)
+    st.divider()
+    holdings_news_block(holdings)
+    st.divider()
+
+    st.markdown("#### 🔎 개별 종목 정밀 분석")
+    st.caption("종목명·티커·종목코드 아무거나 입력하세요(예: HPSP, 삼성전자, 현대차, 엔비디아, NVDA).")
+    with st.form("analyze_form"):
+        c1, c2 = st.columns([3, 1])
+        query = c1.text_input("종목 검색", placeholder="예: HPSP / 삼성전자 / 엔비디아", key="an_query")
+        submitted = c2.form_submit_button("검색·분석", width="stretch", type="primary")
+    if submitted and query.strip():
+        found = core.search_stocks(query, limit=6)
+        if not found:
+            st.error(f"'{query}' 종목을 찾지 못했습니다. 다른 이름이나 6자리 코드로 시도해 주세요.")
+        elif len(found) == 1:
+            item = found[0]
+            with st.spinner(f"{item['name']} 데이터를 불러오는 중..."):
+                snap = core.fetch_snapshot(item["code"], name_hint=item.get("name"), deep=True)
+            st.session_state["analysis"] = {"snapshot": snap, "candidates": []}
+        else:
+            st.session_state["analysis"] = {"snapshot": None, "candidates": found, "query": query}
+
+    data = st.session_state.get("analysis") or {}
+    candidates = data.get("candidates") or []
+    if candidates:
+        st.markdown(f"**'{data.get('query', '')}' 검색 결과** — 종목을 선택하면 상세 분석을 보여줍니다.")
+        labels = [f"{c['name']} ({c['code']}) · {c.get('board') or c.get('market', '')}"
+                  for c in candidates]
+        pick = st.selectbox("검색 결과", range(len(candidates)), format_func=lambda i: labels[i],
+                            key="analysis_pick")
+        if st.button("이 종목 분석", key="analysis_go"):
+            item = candidates[pick]
+            with st.spinner(f"{item['name']} 데이터를 불러오는 중..."):
+                snap = core.fetch_snapshot(item["code"], name_hint=item.get("name"), deep=True)
+            st.session_state["analysis"] = {"snapshot": snap, "candidates": []}
+            data = st.session_state["analysis"]
+
+    snap = data.get("snapshot")
+    if not snap:
+        return
+    render_detail(snap, rules, key=f"an_{snap.code}")
 
 
 # ------------------------------------------------- 4) 추천 추적 성적표 ----
@@ -650,16 +1013,11 @@ def tab_tracker() -> None:
                 status = "🟢 진행 중(+)"
             else:
                 status = "🟡 진행 중(-)"
-            days = "-"
-            try:
-                days = f"{(date.today() - date.fromisoformat(p['date'])).days}일"
-            except Exception:
-                pass
             rows.append({
                 "등록일": p.get("date", ""), "종목": snap.name or p.get("name", ""),
                 "코드": snap.code, "등록가": entry, "현재가": price, "수익률(%)": ret,
-                "목표가": target, "경계가": stop, "상태": status, "경과": days,
-                "선정근거": p.get("rationale", ""),
+                "목표가": target, "경계가": stop, "상태": status, "경과": "-",
+                "배당수익률(%)": snap.dividend_yield, "선정근거": p.get("rationale", ""),
             })
 
         avg_ret = sum(returns) / len(returns) if returns else 0.0
@@ -677,6 +1035,7 @@ def tab_tracker() -> None:
                 "수익률(%)": st.column_config.NumberColumn(format="%.1f"),
                 "목표가": st.column_config.NumberColumn(format="%.0f"),
                 "경계가": st.column_config.NumberColumn(format="%.0f"),
+                "배당수익률(%)": st.column_config.NumberColumn(format="%.2f"),
             })
         st.caption("상태는 목표가 도달 → 🎯, 경계가 이탈 → ⚠️ 로 표시됩니다. "
                    "수익률은 등록가 대비 현재가 기준입니다.")
@@ -704,7 +1063,7 @@ def tab_tracker() -> None:
     with st.expander("➕ 추천 기록 직접 추가", expanded=False):
         with st.form("add_pick"):
             c1, c2, c3 = st.columns(3)
-            code = c1.text_input("종목코드·티커", key="pick_add_code")
+            code = c1.text_input("종목명·코드·티커", key="pick_add_code")
             entry = c2.number_input("등록가 (0이면 현재가)", min_value=0.0, step=100.0,
                                     value=0.0, key="pick_add_entry")
             target = c3.number_input("목표가 (0이면 자동)", min_value=0.0, step=100.0,
@@ -712,24 +1071,29 @@ def tab_tracker() -> None:
             rationale = st.text_input("선정 근거", key="pick_add_reason")
             if st.form_submit_button("등록", width="stretch"):
                 if not code.strip():
-                    st.error("종목코드를 입력하세요.")
+                    st.error("종목을 입력하세요.")
                 else:
-                    with st.spinner("데이터 확인 중..."):
-                        snap = core.fetch_snapshot(core.clean_code(code))
-                    scn = core.build_scenarios(snap)
-                    entry_price = entry or snap.price
-                    if not entry_price:
-                        st.error("현재가를 가져오지 못했습니다. 등록가를 직접 입력하세요.")
+                    found = core.search_stocks(code, limit=1)
+                    if not found:
+                        st.error(f"'{code}' 종목을 찾지 못했습니다.")
                     else:
-                        picks_now = load_store("picks")
-                        picks_now.append({
-                            "date": core.today_str(), "code": snap.code,
-                            "name": snap.name or snap.code, "entry_price": entry_price,
-                            "rationale": rationale or "직접 등록", "target": target or scn.get("target"),
-                            "stop": scn.get("stop"), "memo": "",
-                        })
-                        if persist("picks", picks_now, "추천 기록을 추가했습니다."):
-                            st.rerun()
+                        with st.spinner("데이터 확인 중..."):
+                            snap = core.fetch_snapshot(found[0]["code"], name_hint=found[0]["name"])
+                        scn = core.build_scenarios(snap, valuation=core.valuate(snap))
+                        entry_price = entry or snap.price
+                        if not entry_price:
+                            st.error("현재가를 가져오지 못했습니다. 등록가를 직접 입력하세요.")
+                        else:
+                            picks_now = load_store("picks")
+                            picks_now.append({
+                                "date": core.today_str(), "code": snap.code,
+                                "name": snap.name or snap.code, "entry_price": entry_price,
+                                "rationale": rationale or "직접 등록",
+                                "target": target or scn.get("target"),
+                                "stop": scn.get("stop"), "memo": "",
+                            })
+                            if persist("picks", picks_now, "추천 기록을 추가했습니다."):
+                                st.rerun()
 
 
 # ------------------------------------------------------------------- 실행 ----
@@ -756,8 +1120,8 @@ def main() -> None:
 
     st.divider()
     st.caption(f"저장소: {core.storage_label()} · {core.storage_target()} · "
-               f"시세·재무: 네이버 금융(한국) / yfinance·야후 파이낸스(미국) · "
-               "캐시 5분 · 본 화면은 정보 제공용입니다.")
+               f"시세·재무: 네이버 금융(한국/해외) / yfinance 보조 · 뉴스: 네이버·구글뉴스 RSS · "
+               f"캐시 5~10분 · 본 화면은 정보 제공용입니다.")
 
 
 if __name__ == "__main__":
