@@ -3,7 +3,7 @@
 "저가 우량주를 찾고, 투자금을 잃지 않는 것"을 기준으로 **보유 종목 · 후보 종목 · 추천 기록**을
 한 화면에서 점검하는 Streamlit 앱입니다.
 
-- 앱: https://value-investor-can00319.streamlit.app
+- 앱: https://value-investor-studio.streamlit.app
 - 저장소: https://github.com/can00319-tech/value-investor
 
 ## 4개 탭
