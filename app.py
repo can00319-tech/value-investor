@@ -17,6 +17,7 @@ v3 핵심
 
 from __future__ import annotations
 
+import importlib
 import json
 from datetime import date
 
@@ -24,6 +25,11 @@ import pandas as pd
 import streamlit as st
 
 import vi_core as core
+
+# Streamlit Cloud는 파일 변경 시 앱 스크립트만 다시 실행하고 import된 모듈은 캐시된 채로 둔다.
+# 배포 직후 구버전 vi_core가 남아 있으면 v3 기능이 없는 상태로 오류가 나므로, 한 번 새로 읽는다.
+if not hasattr(core, "now_text"):  # pragma: no cover - 배포 환경 전용 안전장치
+    core = importlib.reload(core)
 
 st.set_page_config(page_title="가치투자 스튜디오 v3", page_icon="📈", layout="wide")
 
