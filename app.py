@@ -428,18 +428,27 @@ def trend_chart(rows: list[dict], field: str, title: str, unit: str = "",
 
 
 def money_bar(rows: list[dict], label_key: str, value_key: str, title: str,
-              unit: str = "원", height: int = 240):
+              unit: str = "원", height: int = 240, horizontal: bool = False,
+              color: str | None = None):
     import altair as alt
     data = [{"항목": r.get(label_key), "값": r.get(value_key) or 0} for r in rows]
     if not data:
         return None
     df = pd.DataFrame(data)
-    return alt.Chart(df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
-        x=alt.X("항목:N", title=None, sort=None),
-        y=alt.Y("값:Q", title=unit),
-        color=alt.condition(alt.datum["값"] >= 0, alt.value("#12805c"), alt.value("#b3261e")),
-        tooltip=[alt.Tooltip("항목:N"), alt.Tooltip("값:Q", format=",.0f")],
-    ).properties(height=height, title=alt.TitleParams(title, fontSize=12, anchor="start"))
+    color_enc = (alt.value(color) if color else
+                 alt.condition(alt.datum["값"] >= 0, alt.value("#12805c"), alt.value("#b3261e")))
+    tooltip = [alt.Tooltip("항목:N"), alt.Tooltip("값:Q", format=",.0f")]
+    if horizontal:
+        chart = alt.Chart(df).mark_bar().encode(
+            y=alt.Y("항목:N", title=None, sort=None),
+            x=alt.X("값:Q", title=unit),
+            color=color_enc, tooltip=tooltip)
+    else:
+        chart = alt.Chart(df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+            x=alt.X("항목:N", title=None, sort=None),
+            y=alt.Y("값:Q", title=unit),
+            color=color_enc, tooltip=tooltip)
+    return chart.properties(height=height, title=alt.TitleParams(title, fontSize=12, anchor="start"))
 
 
 def sector_pie(weights: dict, title: str = "", height: int = 240):
@@ -911,7 +920,8 @@ def menu_overview(rules: core.FilterRules) -> None:
         st.markdown("#### 자산 구성")
         comp = [{"구분": "주식 평가금액", "금액": summary["market_value"]},
                 {"구분": "예수금", "금액": summary["cash"]}]
-        show_chart(money_bar(comp, "구분", "금액", "총자산 구성", height=200))
+        show_chart(money_bar(comp, "구분", "금액", "총자산 구성", height=170,
+                             horizontal=True, color="#1f4e9c"))
         if summary["rows"]:
             st.dataframe(pd.DataFrame(pick_cols(summary["rows"],
                                                 ["종목", "평가금액", "비중(%)", "평가손익", "수익률(%)",
@@ -1545,7 +1555,8 @@ def menu_risk(rules: core.FilterRules) -> None:
         st.markdown("#### 자산 구성")
         comp = [{"구분": "주식", "금액": summary["market_value"]},
                 {"구분": "예수금", "금액": summary["cash"]}]
-        show_chart(money_bar(comp, "구분", "금액", "총자산 구성", height=200))
+        show_chart(money_bar(comp, "구분", "금액", "총자산 구성", height=170,
+                             horizontal=True, color="#1f4e9c"))
         st.markdown("#### 분산 제안")
         for line in risk["suggestions"]:
             st.markdown(f"- {line}")
