@@ -723,6 +723,10 @@ def fetch_news(query: str, limit: int = 4) -> list[dict]:
 
 NEWS_TOPICS = [
     ("국내 증시", "코스피 외국인 수급"),
+    ("공시·실적", "실적 공시 잠정실적 발표"),
+    ("수주·계약", "수주 계약 체결 공급"),
+    ("정책·규제", "정부 규제 정책 발표"),
+    ("증권사 리포트", "증권사 리포트 목표주가"),
     ("반도체", "반도체 HBM 수출"),
     ("원전·에너지", "원전 수주 체코"),
     ("건설", "건설 수주 부동산"),
@@ -958,8 +962,13 @@ def build_scenarios(snap: StockSnapshot, avg_price: float | None = None,
     fair_basis = "적정가 = (BPS×1배 + EPS×12배) 평균"
     if valuation is not None and getattr(valuation, "fair", None):
         fair = valuation.fair
-        fair_basis = ("적정가 = PER·PBR·DCF 3방식 가중 평균"
-                      + (f" ({valuation.profile} 기준)" if getattr(valuation, "profile", "") else ""))
+        if getattr(valuation, "excluded", None):
+            fair_basis = (f"적정가 = {valuation.weight_summary()} 가중"
+                          f" (제외: {', '.join(e['name'].replace(' 방식', '') for e in valuation.excluded)})")
+        else:
+            fair_basis = "적정가 = PER·PBR·DCF 3방식 가중 평균"
+        if getattr(valuation, "profile", ""):
+            fair_basis += f" · {valuation.profile} 유형"
     anchor_max = band["target"]
 
     def pct(base, value):
@@ -1024,6 +1033,35 @@ def build_scenarios(snap: StockSnapshot, avg_price: float | None = None,
     if snap.op_income is not None and snap.op_income <= 0:
         warn.append(f"현재 영업이익 적자({snap.op_income:,.0f}): 이미 경계 상태, 보유 이유를 다시 확인")
 
+    # v3: 판단근거·매수/목표/손절 가격·투자논리 훼손 조건까지 한 번에 만든다.
+    margin = safety_margin(fair, price)
+    health = financial_health(snap)
+    judgment = investment_judgment(snap, valuation=valuation, fair=fair)
+    first_entry = add_entry = None
+    if fair:
+        first_entry = fair * 0.90
+        if price is not None and price < first_entry:
+            first_entry = price
+        add_entry = first_entry * 0.92
+    elif price:
+        first_entry = price * 0.95
+        add_entry = first_entry * 0.92
+
+    basis_lines: list[str] = []
+    if fair:
+        basis_lines.append(f"적정가 {money(fair, cur)} — {fair_basis}")
+    if margin is not None:
+        basis_lines.append(f"{judgment['badge']} — 현재가 {money(price, cur)} vs 적정가, 안전마진 {margin:+.1f}%")
+    basis_lines.append(f"재무상태 {health['badge']}"
+                       + (f" — {health['reasons'][0]}" if health.get("reasons") else ""))
+    if first_entry:
+        gap = pct(price, first_entry)
+        basis_lines.append(
+            f"1차 매수 기준 {money(first_entry, cur)}" + (f" (현재가 대비 {gap:+.1f}%)" if gap is not None else ""))
+
+    invalidation = invalidation_checks(snap)
+    invalidation_lines = [f"{item['label']} — {item['detail']}" for item in invalidation]
+
     return {
         "currency": cur,
         "상승": {
@@ -1058,6 +1096,17 @@ def build_scenarios(snap: StockSnapshot, avg_price: float | None = None,
         "target": target,
         "stop": stop,
         "premium_pct": premium,
+        # --- v3 ---
+        "safety_margin": margin,
+        "judgement_basis": basis_lines,
+        "entry": {"first": first_entry, "add": add_entry},
+        "buy1": first_entry,
+        "buy2": add_entry,
+        "hold_price": fair,
+        "invalidations": invalidation_lines,
+        "invalidation_checks": invalidation,
+        "health": health,
+        "judgment": judgment,
     }
 
 
@@ -2346,11 +2395,17 @@ DCF_YEARS = 5
 
 @dataclass
 class ValuationMethod:
+    """적정가 계산 한 방식(PER·PBR·DCF)의 결과."""
+
     name: str
     value: float | None
-    weight: float
+    weight: float                 # 유형별 설정 가중치
     basis: str
     note: str = ""
+    # --- v3 ---
+    excluded: bool = False        # 계산에서 완전히 제외됐는지
+    reason: str = ""              # 제외 사유(적자/음수 EPS·데이터 부족)
+    effective: float = 0.0        # 남은 방식끼리 재배분한 실제 가중치(합계 100%)
 
 
 @dataclass
@@ -2367,6 +2422,30 @@ class Valuation:
     assumptions: list[str] = field(default_factory=list)
     note: str = ""
     profile: str = ""
+    # --- v3 ---
+    safety_margin: float | None = None                   # (적정가-현재가)/적정가*100
+    excluded: list[dict] = field(default_factory=list)   # [{name, reason}]
+    target_per: float = 0.0
+    target_pbr: float = 0.0
+    weights: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    price_as_of: str = ""
+    finance_basis: str = ""
+
+    def weight_summary(self) -> str:
+        """실제 적용된 가중치(제외 방식은 빠지고 재배분된 값)."""
+        parts = [f"{m.name.replace(' 방식', '')} {m.effective:.0%}"
+                 for m in self.methods if m.value is not None]
+        return " · ".join(parts) if parts else "가중치 없음"
+
+    def margin_text(self) -> str:
+        if self.safety_margin is None:
+            return "안전마진 확인 불가"
+        return f"안전마진 {self.safety_margin:+.1f}%"
+
+    def exclusion_text(self) -> str:
+        if not self.excluded:
+            return ""
+        return " / ".join(f"{e['name']} 제외 — {e['reason']}" for e in self.excluded)
 
 
 def valuation_profile(snap: StockSnapshot) -> str:
@@ -2381,12 +2460,12 @@ def valuation_profile(snap: StockSnapshot) -> str:
 
 
 def valuate(snap: StockSnapshot, history: FinancialHistory | None = None) -> Valuation:
-    """PER·PBR·DCF 3방식 적정가 + 4단계 대응 구간표.
+    """PER·PBR·DCF 3방식 적정가 + 4단계 대응 구간표 + 안전마진.
 
-    - PER: EPS × 섹터 목표 PER
-    - PBR: BPS × 섹터 목표 PBR
-    - DCF: 5년 FCF 추정(영업현금흐름/순이익 기반) → 할인율 10%, 영구성장 2%
-    가중치는 섹터·기업 특성(금융/자산주/성장/제조)에 따라 달라진다.
+    v3 원칙
+      - 적자기업(EPS ≤ 0 또는 영업적자)은 PER 방식을 **완전히 제외**하고 사유를 남긴다.
+      - 남은 방식(PBR·DCF)끼리 가중치를 100%로 재배분한다(섹터별 기본 가중치 유지).
+      - 적정가 대비 현재가의 안전마진(%)을 계산한다.
     """
     cur = snap.currency or "KRW"
     profile = valuation_profile(snap)
@@ -2394,9 +2473,20 @@ def valuate(snap: StockSnapshot, history: FinancialHistory | None = None) -> Val
     target_per = TARGET_PER_BY_SECTOR.get(snap.sector, 12.0)
     target_pbr = TARGET_PBR_BY_SECTOR.get(snap.sector, 1.0)
 
-    eps = snap.eps if (snap.eps or 0) > 0 else None
     bps = snap.bps if (snap.bps or 0) > 0 else None
-    per_value = eps * target_per if eps else None
+    operating_loss = snap.op_income is not None and snap.op_income <= 0
+
+    # --- PER: 적자기업은 완전 제외 --------------------------------------
+    per_reason = ""
+    if snap.eps is None:
+        per_reason = "EPS 확인 불가로 PER 평가 제외"
+    elif snap.eps <= 0 and operating_loss:
+        per_reason = "적자/음수 EPS로 PER 평가 제외 (영업적자 동반)"
+    elif snap.eps <= 0:
+        per_reason = "적자/음수 EPS로 PER 평가 제외"
+    elif operating_loss:
+        per_reason = "영업적자로 PER 평가 제외"
+    per_value = None if per_reason else snap.eps * target_per
     pbr_value = bps * target_pbr if bps else None
 
     # DCF — 주당 가치
@@ -2441,23 +2531,35 @@ def valuate(snap: StockSnapshot, history: FinancialHistory | None = None) -> Val
         assumptions.append("현금흐름·순이익이 적자이거나 주식 수를 확인할 수 없어 DCF는 계산하지 않았습니다.")
 
     methods = [
-        ValuationMethod("PER 방식", per_value, w_per if per_value else 0.0,
-                        f"EPS × 목표 PER {target_per:g}배",
-                        "" if per_value else "EPS가 없거나 적자(PER 기준 부적합)"),
-        ValuationMethod("PBR 방식", pbr_value, w_pbr if pbr_value else 0.0,
-                        f"BPS × 목표 PBR {target_pbr:g}배",
-                        "" if pbr_value else "BPS 확인 불가"),
-        ValuationMethod("DCF 방식", dcf_value, w_dcf if dcf_value else 0.0,
-                        "5년 FCF + 영구가치 현재가치 ÷ 주식 수",
-                        "" if dcf_value else "현금흐름·주식 수 부족"),
+        ValuationMethod("PER 방식", per_value, w_per,
+                        f"EPS × 목표 PER {target_per:g}배" if per_value is not None else "계산 제외",
+                        "" if per_value is not None else per_reason,
+                        excluded=per_value is None, reason="" if per_value is not None else per_reason),
+        ValuationMethod("PBR 방식", pbr_value, w_pbr,
+                        f"BPS × 목표 PBR {target_pbr:g}배" if pbr_value is not None else "계산 제외",
+                        "" if pbr_value is not None else "BPS 확인 불가",
+                        excluded=pbr_value is None,
+                        reason="" if pbr_value is not None else "BPS 확인 불가"),
+        ValuationMethod("DCF 방식", dcf_value, w_dcf,
+                        "5년 FCF + 영구가치 현재가치 ÷ 주식 수" if dcf_value is not None else "계산 제외",
+                        "" if dcf_value is not None else "현금흐름·주식 수 부족",
+                        excluded=dcf_value is None,
+                        reason="" if dcf_value is not None else "현금흐름·주식 수 부족"),
     ]
-    total_w = sum(m.weight for m in methods if m.value)
-    fair = None
-    if total_w > 0:
-        fair = sum((m.value or 0) * m.weight for m in methods if m.value) / total_w
+    # 남은 방식끼리 가중치 재배분(제외 방식이 0이 되어도 합계는 100%)
+    total_w = sum(m.weight for m in methods if m.value is not None)
+    for m in methods:
+        m.effective = (m.weight / total_w) if (m.value is not None and total_w) else 0.0
+    active = [m for m in methods if m.value is not None]
+    fair = sum((m.value or 0.0) * m.effective for m in active) if active else None
 
     result = Valuation(currency=cur, methods=methods, fair=fair, current=snap.price,
-                       assumptions=assumptions)
+                       assumptions=assumptions, profile=profile, target_per=target_per,
+                       target_pbr=target_pbr, weights=(w_per, w_pbr, w_dcf),
+                       excluded=[{"name": m.name, "reason": m.reason}
+                                 for m in methods if m.value is None],
+                       price_as_of=price_as_of_text(snap),
+                       finance_basis=financial_basis_text(snap, history))
     if fair and fair > 0:
         result.low = fair * 0.90
         result.high = fair * 1.15
@@ -2476,10 +2578,17 @@ def valuate(snap: StockSnapshot, history: FinancialHistory | None = None) -> Val
         current_tier = next((r for r in result.rows if r["지금"]), None)
         result.tier = current_tier["구간"] if current_tier else "구간 확인 불가"
         result.tier_key = result.tier
+        result.safety_margin = safety_margin(fair, snap.price)
     else:
         result.note = "EPS·BPS·현금흐름이 모두 부족해 적정가를 계산하지 못했습니다. 시나리오 참고만 하세요."
-    result.note = result.note or f"가중치 유형: {profile} (PER {w_per:.0%}·PBR {w_pbr:.0%}·DCF {w_dcf:.0%})"
-    result.profile = profile
+
+    notes = [f"가중치 유형: {profile} (설정 PER {w_per:.0%}·PBR {w_pbr:.0%}·DCF {w_dcf:.0%}"
+             f" → 적용 {result.weight_summary()})"]
+    if result.excluded:
+        notes.append("제외: " + " / ".join(f"{e['name']}({e['reason']})" for e in result.excluded))
+    if per_reason and "적자" in per_reason:
+        notes.append("적자기업은 이익(EPS) 기준 PER을 쓰지 않고 PBR·DCF로 평가합니다.")
+    result.note = result.note or " · ".join(notes)
     return result
 
 
@@ -2983,3 +3092,905 @@ def generate_ai_text(prompt: str, provider: str | None = None) -> tuple[str | No
         return None, f"지원하지 않는 AI 제공자: {provider}"
     except Exception as exc:
         return None, f"AI 해설 생성 실패({exc})"
+
+
+# ===================================================================== v3 ====
+# 10대 메뉴(종합현황·보유·재무·적정가·전략·시장·뉴스·위험·성과·설정) 지원 계층.
+# v3의 첫 번째 원칙: '재무상태'(기업이 건강한가)와 '투자판단'(가격이 싼가)을 섞지 않는다.
+
+HEALTH_BADGES = {
+    "영업적자": "🔴 영업적자",
+    "고부채": "🟠 고부채",
+    "재무주의": "🟡 재무주의",
+    "재무양호": "🟢 재무양호",
+    "확인부족": "⚪ 확인부족",
+}
+HEALTH_WORDS = tuple(HEALTH_BADGES)
+JUDGMENT_BADGES = {
+    "저평가": "🟢 저평가",
+    "적정": "🟡 적정",
+    "고평가": "🔴 고평가",
+    "판단보류": "⚪ 판단보류",
+}
+JUDGMENT_WORDS = tuple(JUDGMENT_BADGES)
+ACTION_WORDS = ("매수검토", "보유", "신중", "판단보류")
+# 두 축이 서로의 어휘를 쓰지 않도록 테스트에서 확인한다.
+HEALTH_FORBIDDEN = ("저평가", "고평가", "적정가", "매수", "보유", "신중")
+JUDGMENT_FORBIDDEN = ("적자", "부채", "재무")
+
+
+def now_text() -> str:
+    """화면에 표시할 갱신 시각(분 단위)."""
+    return now_kst().strftime("%Y-%m-%d %H:%M")
+
+
+def _amount_text(value: float | None, snap: StockSnapshot) -> str:
+    """영업이익 등 금액 표기(KR은 억원 단위 입력 → 원화 요약)."""
+    if value is None:
+        return "-"
+    if snap.market == "KR":
+        return compact_money(value * 1e8)
+    return compact_money(value, snap.currency or "USD")
+
+
+def price_as_of_text(snap: StockSnapshot) -> str:
+    """현재가 기준일/시각 — '2026-11-20 15:30 (장마감)' / '... (장중)'."""
+    raw = str(snap.as_of or "").strip()
+    if not raw:
+        return "시세 기준 확인 불가"
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})", raw)
+    if not m:
+        return raw[:16].replace("T", " ")
+    date_text = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    hh, mm = int(m.group(4)), int(m.group(5))
+    today = now_kst().date().isoformat()
+    close = (15, 30) if snap.market == "KR" else (16, 0)
+    closed = date_text < today or (hh, mm) >= close
+    # 해외 종목은 현지 시각 기준이므로 시간대를 단정하지 않고 그대로 표기한다.
+    mark = "장마감" if (closed and snap.market == "KR") else ("장마감" if closed else "장중")
+    return f"{date_text} {hh:02d}:{mm:02d} ({mark})"
+
+
+def financial_basis_text(snap: StockSnapshot, history: "FinancialHistory | None" = None) -> str:
+    """재무자료 기준 — '2025.12 확정 · 2026.12 추정'."""
+    if history is not None and history.years:
+        confirmed = [y for y, e in zip(history.years, history.estimated) if not e]
+        estimated = [y for y, e in zip(history.years, history.estimated) if e]
+        parts = []
+        if confirmed:
+            parts.append(f"{confirmed[-1]}.12 확정")
+        if estimated:
+            parts.append(f"{estimated[-1]}.12 추정")
+        if not parts and history.years:
+            parts.append(f"{history.years[-1]}.12")
+        return " · ".join(parts)
+    if snap.fiscal_year:
+        year = re.search(r"(20\d{2})", str(snap.fiscal_year))
+        return f"{year.group(1) if year else snap.fiscal_year}.12 확정"
+    return "재무자료 기준 확인 불가"
+
+
+def safety_margin(fair: float | None, price: float | None) -> float | None:
+    """안전마진(%) = (적정가 - 현재가) / 적정가 * 100."""
+    if not fair or price is None or fair == 0:
+        return None
+    return (fair - price) / fair * 100.0
+
+
+def financial_health(snap: StockSnapshot) -> dict:
+    """기업의 재무상태만 판정한다 — 가격(저평가/고평가) 표현 금지."""
+    op, debt, roe, ocf = snap.op_income, snap.debt_ratio, snap.roe, snap.ocf
+    is_fin = snap.sector == "금융"
+    details: list[str] = []
+    if op is not None:
+        details.append(f"영업이익 {_amount_text(op, snap)} ({'흑자' if op > 0 else '적자'})")
+    if roe is not None:
+        details.append(f"ROE {roe:.1f}%")
+    if debt is not None:
+        details.append(f"부채비율 {debt:.1f}%" + (" (금융업 참고용)" if is_fin else ""))
+    if ocf is not None:
+        details.append("영업현금흐름 " + ("양수" if ocf > 0 else "마이너스"))
+    if is_fin:
+        details.append("금융업은 부채비율 대신 ROE·자본적정성으로 판단")
+
+    label = "재무양호"
+    reasons: list[str] = []
+    if op is not None and op <= 0:
+        label = "영업적자"
+        reasons.append(f"영업이익 {_amount_text(op, snap)} — 본업에서 이익을 내지 못합니다.")
+    elif (not is_fin) and debt is not None and debt > 200:
+        label = "고부채"
+        reasons.append(f"부채비율 {debt:.1f}%로 200% 상한을 넘습니다.")
+    elif ((roe is not None and roe < 0)
+          or (ocf is not None and ocf < 0)
+          or ((not is_fin) and debt is not None and debt > 150)
+          or (is_fin and roe is not None and roe < 3)
+          or (op is not None and op > 0 and snap.op_margin is not None and snap.op_margin < 3)):
+        label = "재무주의"
+        if roe is not None and roe < 0:
+            reasons.append(f"ROE {roe:.1f}%로 자본을 까먹고 있습니다.")
+        if ocf is not None and ocf < 0:
+            reasons.append("영업현금흐름이 마이너스입니다.")
+        if debt is not None and not is_fin and debt > 150:
+            reasons.append(f"부채비율 {debt:.1f}%로 150%를 넘습니다.")
+        if is_fin and roe is not None and roe < 3:
+            reasons.append(f"ROE {roe:.1f}%로 자본 효율이 낮습니다.")
+        if op is not None and op > 0 and snap.op_margin is not None and snap.op_margin < 3:
+            reasons.append(f"영업이익률 {snap.op_margin:.1f}%로 수익성이 얇습니다.")
+
+    known = sum(1 for v in (op, debt, roe, ocf) if v is not None)
+    if known == 0:
+        label = "확인부족"
+        reasons = ["영업이익·부채비율·ROE·현금흐름을 확인하지 못했습니다."]
+    elif not reasons:
+        reasons = ["확인된 재무 지표가 기준 안에 있습니다."]
+    return {"label": label, "badge": HEALTH_BADGES[label], "reasons": reasons,
+            "detail": " · ".join(details), "known": known}
+
+
+def investment_judgment(snap: StockSnapshot, valuation: Valuation | None = None,
+                        fair: float | None = None) -> dict:
+    """가격(밸류에이션)만 판정한다 — 재무상태 어휘 금지."""
+    margin = None
+    if valuation is not None:
+        margin = valuation.safety_margin
+        fair = fair if fair is not None else valuation.fair
+    if margin is None and fair:
+        margin = safety_margin(fair, snap.price)
+    if margin is None:
+        return {"label": "판단보류", "badge": JUDGMENT_BADGES["판단보류"], "action": "판단보류",
+                "margin": None, "full": f"{JUDGMENT_BADGES['판단보류']} · 판단보류",
+                "reason": "적정가를 계산할 수 없어 가격 판단을 보류합니다."}
+    if margin >= 20:
+        label, action = "저평가", "매수검토"
+        reason = f"적정가 대비 {margin:.1f}% 싸게 거래되고 있습니다."
+    elif margin >= 0:
+        label, action = "적정", "보유"
+        reason = f"적정가 대비 {margin:.1f}% 여유가 있는 구간입니다."
+    elif margin > -15:
+        label, action = "고평가", "보유"
+        reason = f"적정가보다 {abs(margin):.1f}% 비싸 신규 매수는 서두를 이유가 적습니다."
+    else:
+        label, action = "고평가", "신중"
+        reason = f"적정가보다 {abs(margin):.1f}% 비싸 추격 매수는 피하는 구간입니다."
+    return {"label": label, "badge": JUDGMENT_BADGES[label], "action": action, "margin": margin,
+            "full": f"{JUDGMENT_BADGES[label]} · {action}", "reason": reason}
+
+
+SECTOR_INVALIDATIONS: dict[str, list[str]] = {
+    "원전·에너지": ["체코 등 주요 원전 수주 취소·지연 또는 수주잔고 2분기 연속 감소",
+                    "전력기기(변압기 등) 수주 단가 10% 이상 하락"],
+    "반도체": ["HBM·D램 고정거래가 2분기 연속 하락",
+               "주요 고객사 설비투자(CAPEX) 가이던스 20% 이상 축소"],
+    "건설": ["PF 우발채무 손실 확대·미착공 현장 증가", "수주잔고 20% 이상 감소"],
+    "바이오": ["주력 파이프라인 임상 실패·허가 불허", "주요 품목 특허 만료·약가 인하"],
+    "금융": ["ROE 5% 미만으로 하락", "대손충당금 급증·연체율 2분기 연속 상승"],
+    "제조·철강": ["철강 스프레드 2분기 연속 축소", "주요 수요처(건설·자동차) 가동률 급락"],
+    "자동차·조선": ["수주잔고 감소·선가 하락", "관세·통상 리스크로 주력 시장 판매 20% 이상 감소"],
+    "2차전지": ["리튬·양극재 가격 급락 지속", "주요 고객사 발주 물량 20% 이상 축소"],
+    "인터넷·SW": ["주력 서비스 이용자·광고 매출 2분기 연속 감소", "AI 투자 대비 수익화 지연"],
+    "유통·식품": ["동일점 매출 2분기 연속 감소", "원가율 3%p 이상 상승"],
+    "통신·운송": ["운임지수 30% 이상 하락", "유가 급등으로 연료비 부담 확대"],
+    "기타": ["주력 사업 매출 2분기 연속 감소"],
+}
+
+DEBT_LIMIT = 200.0
+
+
+def invalidation_checks(snap: StockSnapshot) -> list[dict]:
+    """투자논리 훼손 조건 체크리스트 — 지금 이미 해당하는 항목은 triggered=True."""
+    checks = [
+        {"key": "op_loss", "label": "영업적자 전환",
+         "detail": "분기 영업이익이 적자로 돌아서면 이익 성장 논리가 훼손된 것으로 봅니다.",
+         "triggered": snap.op_income is not None and snap.op_income <= 0},
+        {"key": "debt", "label": f"부채비율 {DEBT_LIMIT:.0f}% 상한 돌파",
+         "detail": f"부채비율이 {DEBT_LIMIT:.0f}%를 넘으면 재무 리스크로 판단합니다.",
+         "triggered": snap.debt_ratio is not None and snap.debt_ratio > DEBT_LIMIT},
+        {"key": "ocf", "label": "영업현금흐름 적자 2분기 지속",
+         "detail": "이익이 현금으로 들어오지 않으면 가치함정을 의심합니다.",
+         "triggered": snap.ocf is not None and snap.ocf < 0},
+        {"key": "eps", "label": "EPS 2년 연속 감소",
+         "detail": "EPS가 무너지면 적정가(EPS×PER)의 기준을 다시 계산합니다.",
+         "triggered": False},
+    ]
+    for i, text in enumerate(SECTOR_INVALIDATIONS.get(snap.sector, SECTOR_INVALIDATIONS["기타"])):
+        checks.append({"key": f"sector_{i}", "label": "핵심 업황·수주 훼손",
+                       "detail": text, "triggered": False})
+    return checks
+
+
+def build_strategy(snap: StockSnapshot, avg_price: float | None = None,
+                   valuation: Valuation | None = None, filt: dict | None = None,
+                   saved: dict | None = None) -> dict:
+    """매매 전략 — 판단근거·1차/추가 매수·목표·손절·투자논리 훼손 조건을 한 묶음으로."""
+    val = valuation if valuation is not None else valuate(snap)
+    scn = build_scenarios(snap, avg_price=avg_price, valuation=val)
+    saved = saved or {}
+    cur = snap.currency or "KRW"
+    buy1 = saved.get("buy1") or scn.get("buy1")
+    buy2 = saved.get("buy2") or scn.get("buy2")
+    target = saved.get("target") or scn.get("target")
+    stop = saved.get("stop") or scn.get("stop")
+    saved_checks = saved.get("checks") or {}
+    checks = []
+    for item in scn.get("invalidation_checks") or []:
+        entry = dict(item)
+        entry["checked"] = bool(saved_checks.get(entry["key"], entry.get("triggered", False)))
+        checks.append(entry)
+
+    def gap(value):
+        if not snap.price or value is None:
+            return None
+        return (value / snap.price - 1) * 100
+
+    basis = list(scn.get("judgement_basis") or [])
+    if filt is not None:
+        basis.append(f"가치점수 {filt.get('score')}점 · 필터 {filt.get('verdict')} — {filt.get('reason')}")
+    basis.append(f"시세 기준 {price_as_of_text(snap)} · 재무자료 {val.finance_basis}")
+    return {
+        "code": snap.code, "name": snap.name or snap.code, "currency": cur,
+        "price": snap.price, "avg_price": avg_price,
+        "buy1": buy1, "buy2": buy2, "target": target, "stop": stop,
+        "hold": scn.get("hold_price"),
+        "buy1_gap": gap(buy1), "buy2_gap": gap(buy2), "target_gap": gap(target), "stop_gap": gap(stop),
+        "basis": basis, "checks": checks, "memo": saved.get("memo", ""),
+        "health": scn.get("health") or financial_health(snap),
+        "judgment": scn.get("judgment") or investment_judgment(snap, val),
+        "scenario": scn, "safety_margin": scn.get("safety_margin"),
+        "updated": saved.get("updated", ""),
+        "as_of": price_as_of_text(snap), "finance_basis": val.finance_basis,
+    }
+
+
+# ------------------------------------------------------- 보유·포트폴리오 ----
+def _rate_for(snap: StockSnapshot, fx: float | None) -> float:
+    return float(fx) if (snap.currency == "USD" and fx) else 1.0
+
+
+def holdings_rows(holdings: list[dict], snapshots, fx: float | None = None,
+                  dividends: list[dict] | None = None) -> list[dict]:
+    """보유 종목 표 — 재무상태와 투자판단을 각각의 열로 분리한다."""
+    if isinstance(snapshots, dict):
+        by_code = {clean_code(k): v for k, v in snapshots.items()}
+    else:
+        by_code = {s.code: s for s in snapshots or []}
+    div = dividend_summary(dividends or [])
+    rows: list[dict] = []
+    for h in holdings or []:
+        code = normalize_code(str(h.get("code") or ""))
+        snap = by_code.get(code) or StockSnapshot(code=code, name=str(h.get("name") or ""))
+        qty = float(parse_num(h.get("qty")) or 0)
+        avg = float(parse_num(h.get("avg_price")) or 0)
+        rate = _rate_for(snap, fx)
+        invested = qty * avg * rate
+        price = snap.price
+        value = qty * price * rate if price is not None else None
+        profit = (value - invested) if value is not None else None
+        ret = (profit / invested * 100) if (profit is not None and invested) else None
+        val = valuate(snap)
+        health = financial_health(snap)
+        judgment = investment_judgment(snap, val)
+        paid = div["by_code"].get(code) or {}
+        rows.append({
+            "종목": snap.name or h.get("name") or code, "코드": code, "섹터": snap.sector,
+            "수량": qty, "평단가": avg, "현재가": price,
+            "매입금액": invested, "평가금액": value, "평가손익": profit, "수익률(%)": ret,
+            "비중(%)": None,
+            "재무상태": health["badge"],
+            "투자판단": judgment["full"],
+            "PER": snap.per, "PBR": snap.pbr, "ROE(%)": snap.roe, "부채비율(%)": snap.debt_ratio,
+            "배당수익률(%)": snap.dividend_yield,
+            "수령배당(원)": paid.get("gross"),
+            "적정가": val.fair, "안전마진(%)": val.safety_margin,
+            "시세 기준": price_as_of_text(snap), "재무 기준": val.finance_basis,
+            "통화": snap.currency,
+            "_health": health, "_judgment": judgment, "_valuation": val,
+        })
+    total = sum(r["평가금액"] or 0 for r in rows)
+    for r in rows:
+        r["비중(%)"] = (r["평가금액"] / total * 100) if (total and r["평가금액"] is not None) else None
+    return rows
+
+
+def portfolio_summary(holdings: list[dict], snapshots, trades: list[dict] | None = None,
+                      dividends: list[dict] | None = None, meta: dict | None = None,
+                      fx: float | None = None) -> dict:
+    """총자산·투자원금·평가손익·실현손익·배당·수수료·예수금을 한 번에 집계."""
+    rows = holdings_rows(holdings, snapshots, fx=fx, dividends=dividends)
+    invested = sum(r["매입금액"] for r in rows)
+    market = sum(r["평가금액"] or 0 for r in rows)
+    cash = float(parse_num((meta or {}).get("cash")) or 0)
+    unrealized = market - invested
+    ledger = trade_ledger(trades or [])
+    divs = dividend_summary(dividends or [])
+    realized_net = ledger["realized"] - ledger["fees"] - ledger["taxes"]
+    total_return = unrealized + realized_net + divs["net"]
+    capital = invested + ledger["sold_cost"]
+    return {
+        "rows": rows,
+        "invested": invested, "market_value": market, "cash": cash,
+        "total_assets": market + cash,
+        "unrealized": unrealized,
+        "unrealized_pct": (unrealized / invested * 100) if invested else None,
+        "realized_gross": ledger["realized"], "realized": realized_net,
+        "dividends_gross": divs["gross"], "dividend_tax": divs["tax"], "dividends": divs["net"],
+        "fees": ledger["fees"], "taxes": ledger["taxes"] + divs["tax"],
+        "total_return": total_return,
+        "total_return_pct": (total_return / capital * 100) if capital else None,
+        "capital_base": capital,
+        "cash_ratio": (cash / (market + cash) * 100) if (market + cash) else None,
+        "ledger": ledger, "dividend_detail": divs,
+        "unmatched_sells": ledger["unmatched"],
+    }
+
+
+def portfolio_risk(summary: dict) -> dict:
+    """포트폴리오 위험 진단 — 집중도·섹터 편중·재무 경고·손절선 근접."""
+    rows = summary.get("rows") or []
+    market = summary.get("market_value") or 0
+    assets = summary.get("total_assets") or 0
+    cash = summary.get("cash") or 0
+    warnings: list[dict] = []
+
+    def add(level: str, title: str, detail: str, action: str) -> None:
+        warnings.append({"level": level, "title": title, "detail": detail, "action": action})
+
+    # 1) 단일 종목 집중도
+    if rows:
+        top = max(rows, key=lambda r: r["평가금액"] or 0)
+        weight = top["비중(%)"] or 0
+        if weight >= 40:
+            add("major", f"단일 종목 집중 — {top['종목']} {weight:.1f}%",
+                f"{top['종목']} 한 종목이 보유 평가금액의 {weight:.1f}%입니다. "
+                f"이 종목이 30% 빠지면 평가금액이 {weight * 0.3:.1f}%p 줄어듭니다.",
+                f"{top['종목']} 비중을 25~30% 이하로 줄이고 다른 섹터로 분산하는 것을 검토하세요.")
+        elif weight >= 25:
+            add("warn", f"단일 종목 비중 높음 — {top['종목']} {weight:.1f}%",
+                f"상위 종목 비중이 {weight:.1f}%입니다.", "추가 매수는 비중을 보며 나눠서 하세요.")
+
+    # 2) 섹터 편중도
+    sector_values: dict[str, float] = {}
+    for r in rows:
+        sector_values[r["섹터"]] = sector_values.get(r["섹터"], 0) + (r["평가금액"] or 0)
+    sector_weights = {k: (v / market * 100 if market else 0) for k, v in sector_values.items()}
+    if sector_weights:
+        s_name, s_weight = max(sector_weights.items(), key=lambda kv: kv[1])
+        if s_weight >= 50:
+            add("major", f"섹터 편중 — {s_name} {s_weight:.1f}%",
+                f"{s_name} 섹터가 평가금액의 절반을 넘습니다.",
+                f"{s_name} 비중을 40% 이하로 낮추고, 원전·금융·바이오 등 다른 업황에 분산하세요.")
+        elif s_weight >= 35:
+            add("warn", f"섹터 쏠림 — {s_name} {s_weight:.1f}%",
+                f"{s_name} 섹터 비중이 {s_weight:.1f}%입니다.", "신규 매수는 다른 섹터에서 찾는 편이 안전합니다.")
+
+    # 3) 재무 경고
+    for r in rows:
+        label = (r.get("_health") or {}).get("label")
+        weight = r["비중(%)"] or 0
+        if label == "영업적자":
+            add("major", f"영업적자 종목 보유 — {r['종목']} {weight:.1f}%",
+                f"{(r.get('_health') or {}).get('reasons', [''])[0]}",
+                "적자 지속 여부를 분기 실적으로 확인하고, 회복 근거가 없으면 비중을 줄이세요.")
+        elif label == "고부채":
+            add("warn", f"고부채 종목 — {r['종목']} 부채비율 {r['부채비율(%)']:.0f}%" if r["부채비율(%)"] else f"고부채 종목 — {r['종목']}",
+                "부채비율 200% 초과로 금리·유동성 리스크가 큽니다.",
+                "이자비용과 만기 구조를 확인하고 추가 매수는 보류하세요.")
+
+    # 4) 손절선 근접
+    for r in rows:
+        avg, price = r["평단가"], r["현재가"]
+        if not avg or price is None:
+            continue
+        stop = avg * (1 - STOP_LOSS_PCT / 100)
+        if price <= stop:
+            add("major", f"손절선 이탈 — {r['종목']}",
+                f"현재가 {money(price, r['통화'])}가 평단 -{STOP_LOSS_PCT:.0f}%인 {money(stop, r['통화'])}를 밑돕니다.",
+                "원칙(평단 -15%)을 지킬지, 실적 회복 근거로 보유할지 지금 정하세요.")
+        elif price <= stop * 1.05:
+            add("warn", f"손절선 근접 — {r['종목']}",
+                f"현재가 {money(price, r['통화'])}가 손절선 {money(stop, r['통화'])}의 5% 이내입니다.",
+                "다음 분기 실적과 업황 뉴스를 확인하며 대응을 미리 정해 두세요.")
+
+    # 5) 고평가 구간 비중
+    over = [r for r in rows if (r.get("_judgment") or {}).get("label") == "고평가" and (r["비중(%)"] or 0) >= 15]
+    if over:
+        names = ", ".join(f"{r['종목']} {r['비중(%)']:.0f}%" for r in over[:3])
+        add("info", "고평가 구간 비중", f"적정가보다 비싼 종목이 {names} 있습니다.",
+            "추가 매수 대신 목표가 도달 시 분할 익절을 준비하세요.")
+
+    # 6) 현금 여력·분산
+    if assets and cash / assets * 100 < 5:
+        add("info", "예수금 여력 부족", f"총자산 중 현금 비중이 {cash / assets * 100:.1f}%입니다.",
+            "급락 시 분할 매수 여력을 남겨 두는 편이 좋습니다.")
+    if 0 < len(rows) < 3:
+        add("warn", "분산 부족", f"보유 종목이 {len(rows)}개뿐입니다.",
+            "섹터가 다른 3~5종목으로 나누면 개별 악재의 충격이 줄어듭니다.")
+
+    major = sum(1 for w in warnings if w["level"] == "major")
+    warn = sum(1 for w in warnings if w["level"] == "warn")
+    info = sum(1 for w in warnings if w["level"] == "info")
+    score = max(0, 100 - 20 * major - 8 * warn - 2 * info)
+    level = "양호" if score >= 80 else ("보통" if score >= 60 else "주의")
+
+    suggestions: list[str] = []
+    if sector_weights:
+        target = max(sector_weights.items(), key=lambda kv: kv[1])
+        if target[1] >= 35:
+            suggestions.append(f"{target[0]} {target[1]:.0f}% → 30~35% 이하로 축소")
+    suggestions.append("단일 종목 25%, 단일 섹터 35%를 넘지 않게 유지")
+    suggestions.append("현금 5~10%는 급락장 분할 매수용으로 남겨 두기")
+    suggestions.append("손절선(평단 -15%)에 닿은 종목은 실적 근거를 다시 확인")
+    return {"score": score, "level": level, "warnings": warnings,
+            "sector_weights": sector_weights, "suggestions": suggestions,
+            "major": major, "warn": warn, "info": info}
+
+
+# ------------------------------------------------- 실현손익·배당·수수료 ----
+def _norm_side(value) -> str:
+    s = str(value or "").strip().lower()
+    if s in ("매도", "sell", "s", "매도(sell)"):
+        return "매도"
+    return "매수"
+
+
+def trade_ledger(trades: list[dict]) -> dict:
+    """거래 내역 → 이동평균법 실현손익·수수료·세금·월별 집계.
+
+    매수 기록 없이 매도만 있는 경우는 원가를 알 수 없으므로 실현손익에서 제외하고
+    unmatched 로 따로 센다(없는 이익·손실을 만들지 않는다).
+    """
+    items: list[dict] = []
+    for raw in trades or []:
+        code = normalize_code(str(raw.get("code") or ""))
+        qty = parse_num(raw.get("qty")) or 0
+        price = parse_num(raw.get("price")) or 0
+        if not code or qty <= 0 or price <= 0:
+            continue
+        items.append({
+            "date": str(raw.get("date") or "").strip(),
+            "month": str(raw.get("date") or "")[:7],
+            "code": code, "name": str(raw.get("name") or "").strip(),
+            "side": _norm_side(raw.get("side")),
+            "qty": qty, "price": price,
+            "fee": parse_num(raw.get("fee")) or 0.0,
+            "tax": parse_num(raw.get("tax")) or 0.0,
+            "memo": str(raw.get("memo") or "").strip(),
+        })
+    items.sort(key=lambda x: (x["date"], 0 if x["side"] == "매수" else 1, x["code"]))
+    book: dict[str, dict] = {}
+    sells: list[dict] = []
+    by_month: dict[str, dict] = {}
+    buy_amount = sell_amount = fees = taxes = 0.0
+    unmatched = 0
+    for it in items:
+        month = by_month.setdefault(it["month"] or "-", {
+            "월": it["month"] or "-", "매수금액": 0.0, "매도금액": 0.0,
+            "실현손익": 0.0, "수수료": 0.0, "세금": 0.0})
+        fees += it["fee"]
+        taxes += it["tax"]
+        month["수수료"] += it["fee"]
+        month["세금"] += it["tax"]
+        state = book.setdefault(it["code"], {"qty": 0.0, "cost": 0.0})
+        if it["side"] == "매수":
+            state["qty"] += it["qty"]
+            state["cost"] += it["qty"] * it["price"]
+            buy_amount += it["qty"] * it["price"]
+            month["매수금액"] += it["qty"] * it["price"]
+            continue
+        matched_qty = min(it["qty"], state["qty"])
+        avg_cost = (state["cost"] / state["qty"]) if state["qty"] else 0.0
+        sold_cost = avg_cost * matched_qty
+        realized = (matched_qty * it["price"]) - sold_cost
+        is_matched = matched_qty > 0
+        if not is_matched:
+            unmatched += 1
+        else:
+            state["qty"] -= matched_qty
+            state["cost"] -= sold_cost
+            if state["qty"] < 1e-9:
+                state["qty"], state["cost"] = 0.0, 0.0
+            month["실현손익"] += realized
+        sell_amount += it["qty"] * it["price"]
+        month["매도금액"] += it["qty"] * it["price"]
+        sells.append({
+            "일자": it["date"], "월": it["month"] or "-", "종목": it["name"] or it["code"],
+            "코드": it["code"], "수량": it["qty"], "매도단가": it["price"],
+            "평균원가": round(avg_cost, 2) if is_matched else None,
+            "매도원가": sold_cost if is_matched else None,
+            "실현손익": realized if is_matched else None,
+            "수수료": it["fee"], "세금": it["tax"],
+            "원가확인": "확인" if is_matched else "매수기록 없음",
+        })
+    realized_total = sum(r["실현손익"] or 0 for r in sells)
+    return {
+        "items": items, "sells": sells, "realized": realized_total,
+        "buy_amount": buy_amount, "sell_amount": sell_amount,
+        "fees": fees, "taxes": taxes,
+        "sold_cost": sum(r["매도원가"] or 0 for r in sells),
+        "unmatched": unmatched, "by_month": by_month,
+        "holdings_hint": {c: {"qty": s["qty"], "avg": (s["cost"] / s["qty"]) if s["qty"] else 0}
+                          for c, s in book.items()},
+    }
+
+
+def dividend_summary(dividends: list[dict]) -> dict:
+    """배당 내역 집계(총액·세금·순액·월별·종목별)."""
+    rows: list[dict] = []
+    by_month: dict[str, float] = {}
+    by_code: dict[str, dict] = {}
+    gross_total = tax_total = 0.0
+    for raw in dividends or []:
+        code = normalize_code(str(raw.get("code") or ""))
+        gross = parse_num(raw.get("gross"))
+        tax = parse_num(raw.get("tax")) or 0.0
+        if gross is None:
+            per_share = parse_num(raw.get("per_share")) or 0.0
+            qty = parse_num(raw.get("qty")) or 0.0
+            gross = per_share * qty if (per_share and qty) else 0.0
+        net = parse_num(raw.get("net"))
+        net = (gross - tax) if net is None else net
+        date = str(raw.get("date") or "").strip()
+        entry = {"date": date, "month": date[:7] or "-", "code": code,
+                 "name": str(raw.get("name") or "").strip(), "gross": gross, "tax": tax,
+                 "net": net, "per_share": parse_num(raw.get("per_share")),
+                 "memo": str(raw.get("memo") or "").strip()}
+        rows.append(entry)
+        gross_total += gross
+        tax_total += tax
+        by_month[entry["month"]] = by_month.get(entry["month"], 0.0) + gross
+        bucket = by_code.setdefault(code, {"name": entry["name"], "gross": 0.0, "tax": 0.0,
+                                           "net": 0.0, "count": 0})
+        bucket["gross"] += gross
+        bucket["tax"] += tax
+        bucket["net"] += net
+        bucket["count"] += 1
+        if entry["name"]:
+            bucket["name"] = entry["name"]
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    return {"rows": rows, "gross": gross_total, "tax": tax_total, "net": gross_total - tax_total,
+            "by_month": by_month, "by_code": by_code}
+
+
+def monthly_performance(ledger: dict, divs: dict) -> list[dict]:
+    """월별 실현손익·배당·비용·순수익(입력된 거래·배당 기준)."""
+    months = {m: dict(v) for m, v in (ledger.get("by_month") or {}).items()}
+    for month, gross in (divs.get("by_month") or {}).items():
+        bucket = months.setdefault(month, {"월": month, "매수금액": 0.0, "매도금액": 0.0,
+                                           "실현손익": 0.0, "수수료": 0.0, "세금": 0.0})
+        bucket["배당"] = gross
+    for bucket in months.values():
+        bucket.setdefault("배당", 0.0)
+        bucket["순수익"] = (bucket.get("실현손익", 0.0) + bucket.get("배당", 0.0)
+                            - bucket.get("수수료", 0.0) - bucket.get("세금", 0.0))
+    return [months[m] for m in sorted(months) if m != "-"]
+
+
+def quarterly_performance(monthly: list[dict]) -> list[dict]:
+    """월별 → 분기별 집계."""
+    quarters: dict[str, dict] = {}
+    for row in monthly or []:
+        month = row.get("월", "")
+        if len(month) < 7:
+            continue
+        year, mon = month[:4], int(month[5:7])
+        key = f"{year}-Q{(mon - 1) // 3 + 1}"
+        bucket = quarters.setdefault(key, {"분기": key, "매수금액": 0.0, "매도금액": 0.0,
+                                           "실현손익": 0.0, "배당": 0.0,
+                                           "수수료·세금": 0.0, "순수익": 0.0})
+        bucket["매수금액"] += row.get("매수금액", 0.0)
+        bucket["매도금액"] += row.get("매도금액", 0.0)
+        bucket["실현손익"] += row.get("실현손익", 0.0)
+        bucket["배당"] += row.get("배당", 0.0)
+        bucket["수수료·세금"] += row.get("수수료", 0.0) + row.get("세금", 0.0)
+        bucket["순수익"] += row.get("순수익", 0.0)
+    return [quarters[k] for k in sorted(quarters)]
+
+
+def reconcile_holdings(holdings: list[dict], trades: list[dict]) -> list[dict]:
+    """시트 보유 수량과 거래 내역 합계가 어긋나는 종목을 찾는다."""
+    implied: dict[str, float] = {}
+    for raw in trades or []:
+        code = normalize_code(str(raw.get("code") or ""))
+        qty = parse_num(raw.get("qty")) or 0
+        if not code or qty <= 0:
+            continue
+        sign = 1 if _norm_side(raw.get("side")) == "매수" else -1
+        implied[code] = implied.get(code, 0) + sign * qty
+    held = {normalize_code(str(h.get("code") or "")): (parse_num(h.get("qty")) or 0)
+            for h in holdings or []}
+    out = []
+    for code in sorted(set(implied) | set(held)):
+        sheet_qty = held.get(code, 0.0)
+        trade_qty = implied.get(code, 0.0)
+        if abs(sheet_qty - trade_qty) > 1e-6:
+            out.append({"코드": code, "보유 수량": sheet_qty, "거래내역 수량": trade_qty,
+                        "차이": sheet_qty - trade_qty})
+    return out
+
+
+# ------------------------------------------- 거래·배당·관심종목 저장소 ----
+EXTRA_FILES = {
+    "trades": "trades.json",
+    "dividends": "dividends.json",
+    "watchlist": "watchlist.json",
+    "strategies": "strategies.json",
+    "portfolio_meta": "portfolio_meta.json",
+    "performance": "performance.json",
+}
+
+
+def _extra_path(kind: str) -> Path:
+    return Path(os.environ.get("VI_DATA_DIR") or (BASE_DIR / "data")) / EXTRA_FILES[kind]
+
+
+def extra_sheet_enabled(kind: str = "trades") -> bool:
+    """기존 Apps Script가 임의 탭 이름을 받아 주는 경우에만 켠다(Secrets VI_EXTRA_SHEET=1).
+
+    확인되지 않은 상태에서 시트에 쓰면 보유종목·추천추적 탭을 건드릴 수 있으므로
+    기본값은 로컬 저장이다. 켜 두어도 시트 오류가 나면 조용히 로컬로 되돌아간다.
+    """
+    return os.environ.get("VI_EXTRA_SHEET", "").strip() == "1" and storage_mode() == "gsheet"
+
+
+def normalize_extra_row(kind: str, row: dict) -> dict:
+    if kind == "trades":
+        return {
+            "date": str(row.get("일자") or row.get("date") or "").strip(),
+            "code": normalize_code(str(row.get("종목코드") or row.get("code") or "")),
+            "name": str(row.get("종목명") or row.get("name") or "").strip(),
+            "side": _norm_side(row.get("구분") or row.get("side")),
+            "qty": parse_num(row.get("수량")) if "수량" in row else parse_num(row.get("qty")),
+            "price": parse_num(row.get("단가")) if "단가" in row else parse_num(row.get("price")),
+            "fee": parse_num(row.get("수수료")) if "수수료" in row else parse_num(row.get("fee")),
+            "tax": parse_num(row.get("세금")) if "세금" in row else parse_num(row.get("tax")),
+            "memo": str(row.get("메모") or row.get("memo") or "").strip(),
+        }
+    if kind == "dividends":
+        return {
+            "date": str(row.get("일자") or row.get("date") or "").strip(),
+            "code": normalize_code(str(row.get("종목코드") or row.get("code") or "")),
+            "name": str(row.get("종목명") or row.get("name") or "").strip(),
+            "gross": parse_num(row.get("배당금")) if "배당금" in row else parse_num(row.get("gross")),
+            "tax": parse_num(row.get("세금")) if "세금" in row else parse_num(row.get("tax")),
+            "per_share": parse_num(row.get("주당배당금")) if "주당배당금" in row else parse_num(row.get("per_share")),
+            "memo": str(row.get("메모") or row.get("memo") or "").strip(),
+        }
+    if kind == "watchlist":
+        return {
+            "code": normalize_code(str(row.get("종목코드") or row.get("code") or "")),
+            "name": str(row.get("종목명") or row.get("name") or "").strip(),
+            "added": str(row.get("등록일") or row.get("added") or today_str()),
+            "note": str(row.get("메모") or row.get("note") or "").strip(),
+        }
+    return {str(k): v for k, v in (row or {}).items()}
+
+
+def _extra_sheet_record(kind: str, row: dict) -> dict:
+    if kind == "trades":
+        return {"일자": row.get("date", ""), "종목코드": row.get("code", ""),
+                "종목명": row.get("name", ""), "구분": row.get("side", "매수"),
+                "수량": row.get("qty"), "단가": row.get("price"),
+                "수수료": row.get("fee"), "세금": row.get("tax"), "메모": row.get("memo", "")}
+    if kind == "dividends":
+        return {"일자": row.get("date", ""), "종목코드": row.get("code", ""),
+                "종목명": row.get("name", ""), "배당금": row.get("gross"),
+                "세금": row.get("tax"), "메모": row.get("memo", "")}
+    if kind == "watchlist":
+        return {"종목코드": row.get("code", ""), "종목명": row.get("name", ""),
+                "등록일": row.get("added", ""), "메모": row.get("note", "")}
+    return dict(row or {})
+
+
+def load_extra(kind: str):
+    """거래·배당·관심종목·전략·예수금 저장소(기본 로컬 JSON, 시트는 선택)."""
+    if kind not in EXTRA_FILES:
+        raise ValueError(f"알 수 없는 저장 종류: {kind}")
+    if kind in ("trades", "dividends", "watchlist") and extra_sheet_enabled(kind):
+        try:
+            data = _gsheet_call("GET", kind)
+            records = data.get("records") or []
+            return [normalize_extra_row(kind, r) for r in records if isinstance(r, dict)]
+        except StorageError:
+            pass  # 시트 미지원 → 로컬로 계속
+    path = _extra_path(kind)
+    if not path.exists():
+        return {} if kind == "portfolio_meta" else ({} if kind == "strategies" else [])
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise StorageError(f"{EXTRA_FILES[kind]} 를 읽지 못했습니다({exc})") from exc
+    if kind in ("portfolio_meta", "strategies"):
+        return payload if isinstance(payload, dict) else {}
+    rows = payload if isinstance(payload, list) else []
+    return [normalize_extra_row(kind, r) for r in rows if isinstance(r, dict)]
+
+
+def save_extra(kind: str, payload):
+    """거래·배당·관심종목·전략·예수금 저장(시트가 켜져 있으면 시트, 실패하면 로컬)."""
+    if kind not in EXTRA_FILES:
+        raise ValueError(f"알 수 없는 저장 종류: {kind}")
+    if kind in ("trades", "dividends", "watchlist") and extra_sheet_enabled(kind):
+        try:
+            _gsheet_call("POST", kind, [_extra_sheet_record(kind, r) for r in payload])
+            return payload
+        except StorageError:
+            pass  # 시트 미지원 → 로컬 저장으로 계속
+    path = _extra_path(kind)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        raise StorageError(f"{EXTRA_FILES[kind]} 에 저장하지 못했습니다({exc})") from exc
+    return payload
+
+
+def load_meta() -> dict:
+    raw = load_extra("portfolio_meta")
+    meta = raw if isinstance(raw, dict) else {}
+    return {"cash": float(parse_num(meta.get("cash")) or 0),
+            "cash_note": str(meta.get("cash_note") or ""),
+            "updated": str(meta.get("updated") or "")}
+
+
+def save_meta(cash: float, note: str = "") -> dict:
+    meta = {"cash": float(cash or 0), "cash_note": str(note or ""), "updated": now_text()}
+    save_extra("portfolio_meta", meta)
+    return meta
+
+
+def load_watchlist() -> list[dict]:
+    return [r for r in load_extra("watchlist") if r.get("code")]
+
+
+def add_watchlist(code: str, name: str = "", note: str = "") -> tuple[bool, list[dict]]:
+    rows = load_watchlist()
+    target = normalize_code(code)
+    if any(r["code"] == target for r in rows):
+        return False, rows
+    rows.append({"code": target, "name": name or target, "added": today_str(), "note": note})
+    save_extra("watchlist", rows)
+    return True, rows
+
+
+def remove_watchlist(code: str) -> list[dict]:
+    target = normalize_code(code)
+    rows = [r for r in load_watchlist() if r["code"] != target]
+    save_extra("watchlist", rows)
+    return rows
+
+
+def load_strategies() -> dict:
+    payload = load_extra("strategies")
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_strategy(code: str, data: dict) -> dict:
+    all_rows = load_strategies()
+    entry = {k: data.get(k) for k in ("buy1", "buy2", "target", "stop", "memo", "checks")}
+    entry["updated"] = now_text()
+    all_rows[normalize_code(code)] = entry
+    save_extra("strategies", all_rows)
+    return entry
+
+
+def load_performance() -> list[dict]:
+    rows = load_extra("performance")
+    return sorted([r for r in rows if isinstance(r, dict) and r.get("date")],
+                  key=lambda r: r["date"])
+
+
+def record_performance(entry: dict) -> list[dict]:
+    rows = [r for r in load_performance() if r.get("date") != entry.get("date")]
+    rows.append(entry)
+    rows.sort(key=lambda r: r["date"])
+    save_extra("performance", rows[-400:])
+    return rows
+
+
+# --------------------------------------------------- CSV · JSON 백업 ----
+def rows_to_csv(rows: list[dict], columns: list[str] | None = None) -> str:
+    """엑셀에서 바로 열리는 CSV(UTF-8 BOM)."""
+    import csv
+    import io
+    rows = rows or []
+    columns = columns or (list(rows[0].keys()) if rows else [])
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({c: row.get(c, "") for c in columns})
+    return "\ufeff" + buf.getvalue()
+
+
+def csv_to_rows(text: str) -> list[dict]:
+    import csv
+    import io
+    if not text:
+        return []
+    clean = text.lstrip("\ufeff")
+    reader = csv.DictReader(io.StringIO(clean))
+    return [dict(r) for r in reader]
+
+
+def backup_bundle(include_sheet: bool = True) -> dict:
+    bundle = {
+        "app": "가치투자 스튜디오 v3", "version": 3, "exported_at": now_text(),
+        "trades": load_extra("trades"), "dividends": load_extra("dividends"),
+        "watchlist": load_extra("watchlist"), "meta": load_extra("portfolio_meta"),
+        "strategies": load_extra("strategies"), "performance": load_extra("performance"),
+    }
+    if include_sheet:
+        try:
+            bundle["holdings"] = load_holdings(force=True)
+        except StorageError:
+            bundle["holdings"] = []
+        try:
+            bundle["picks"] = load_picks(force=True)
+        except StorageError:
+            bundle["picks"] = []
+    return bundle
+
+
+def restore_bundle(payload: dict, include_holdings: bool = True) -> dict:
+    """백업 JSON 복원. 시트 보유종목·추천추적은 include_holdings=True 일 때만 덮어쓴다."""
+    counts: dict[str, int] = {}
+    for kind in ("trades", "dividends", "watchlist", "strategies", "performance"):
+        if kind in payload:
+            value = payload[kind]
+            save_extra(kind, value)
+            counts[kind] = len(value) if isinstance(value, list) else 1
+    meta = payload.get("meta", payload.get("portfolio_meta"))
+    if isinstance(meta, dict):
+        save_extra("portfolio_meta", meta)
+        counts["meta"] = 1
+    if include_holdings and isinstance(payload.get("holdings"), list):
+        rows = [r for r in (_normalize_holding(x) for x in payload["holdings"] if isinstance(x, dict)) if r]
+        save_holdings(rows)
+        counts["holdings"] = len(rows)
+    if include_holdings and isinstance(payload.get("picks"), list):
+        rows = [r for r in (_normalize_pick(x) for x in payload["picks"] if isinstance(x, dict)) if r]
+        save_picks(rows)
+        counts["picks"] = len(rows)
+    return counts
+
+
+# --------------------------------------------------- 시장 뉴스 분류 ----
+def digest_from_news_map(news_map: dict, limit: int = 40) -> NewsDigest:
+    """주제별 뉴스 묶음 → 카테고리·호재/악재가 붙은 NewsDigest(실제 URL·게시시각만)."""
+    digest = NewsDigest(generated_at=now_text())
+    seen: set[str] = set()
+    for topic, items in (news_map or {}).items():
+        for item in items or []:
+            title = str(item.get("title") or "").strip()
+            link = str(item.get("link") or "").strip()
+            if not title or not link.startswith("http") or title in seen:
+                continue
+            seen.add(title)
+            dt = _parse_pubdate(item.get("published") or "")
+            published = dt.strftime("%Y-%m-%d %H:%M") if dt else (str(item.get("published") or "")[:16] or "시각 미상")
+            age = ((now_kst() - dt).total_seconds() / 3600) if dt else None
+            category = _categorize(title, age)
+            if topic in CATEGORY_ORDER:
+                category = topic
+            digest.items.append(NewsItem(title=title, link=link, published=published,
+                                         source=str(item.get("source") or "뉴스"),
+                                         category=category, sentiment=_sentiment(title)))
+    digest.items.sort(key=lambda i: i.published, reverse=True)
+    digest.items = digest.items[:limit]
+    if not digest.items:
+        digest.note = "뉴스를 가져오지 못했습니다(네트워크 확인)."
+    return digest
+
+
+def recent_news(digest: NewsDigest, hours: int = 24) -> list[NewsItem]:
+    """최근 N시간 이내 게시된 기사만(시각 미상은 제외)."""
+    cutoff = now_kst() - timedelta(hours=hours)
+    out = []
+    for item in digest.items:
+        try:
+            stamp = datetime.strptime(item.published, "%Y-%m-%d %H:%M").replace(tzinfo=KST)
+        except Exception:
+            continue
+        if stamp >= cutoff:
+            out.append(item)
+    return out
