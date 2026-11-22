@@ -54,6 +54,9 @@ def test_parsing() -> None:
     check("원화 표기", core.money(40250, "KRW") == "40,250원", core.money(40250, "KRW"))
     check("달러 표기", core.money(237.4, "USD") == "$237.40", core.money(237.4, "USD"))
     check("통화 표기(None)", core.money(None) == "-")
+    check("앞자리 0 잃은 코드 복원(67310→067310)", core.normalize_code("67310") == "067310",
+          core.normalize_code("67310"))
+    check("미국 티커는 그대로", core.normalize_code("AAPL") == "AAPL")
 
 
 # --------------------------------------------------------- [2] 가치함정 필터 ----
@@ -189,7 +192,7 @@ def test_sheet_storage() -> None:
             sheet = (params or {}).get("sheet")
             if sheet == "holdings":
                 return FakeResp({"ok": True, "records": [
-                    {"종목코드": "067310", "종목명": "하나마이크론", "수량": 8, "평단가": 25000, "메모": ""},
+                    {"종목코드": 67310, "종목명": "하나마이크론", "수량": 8, "평단가": 25000, "메모": ""},
                     {"종목코드": "", "종목명": "빈행", "수량": 1, "평단가": 1},
                 ]})
             return FakeResp({"ok": True, "records": [
@@ -206,7 +209,8 @@ def test_sheet_storage() -> None:
     core.requests = FakeRequests  # type: ignore[assignment]
     try:
         holders = core.load_holdings(force=True)
-        check("GET 응답 파싱", len(holders) == 1 and holders[0]["name"] == "하나마이크론", str(holders))
+        check("GET 응답 파싱(숫자 코드도 6자리 복원)", len(holders) == 1 and holders[0]["name"] == "하나마이크론"
+              and holders[0]["code"] == "067310", str(holders))
         check("GET 요청에 token·sheet 전달",
               calls[0]["params"].get("token") == "test-token" and calls[0]["params"].get("sheet") == "holdings",
               str(calls[0]))

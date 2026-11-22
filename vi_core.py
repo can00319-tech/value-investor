@@ -1074,6 +1074,14 @@ def _gsheet_call(method: str, kind: str, records: list[dict] | None = None) -> d
     return data
 
 
+def normalize_code(code: str) -> str:
+    """시트가 숫자로 읽어 앞자리 0을 잃은 한국 종목코드를 6자리로 되돌린다."""
+    s = clean_code(code)
+    if s.isdigit() and len(s) < 6:
+        return s.zfill(6)
+    return s
+
+
 def _normalize_holding(row: dict) -> dict | None:
     code = str(row.get("종목코드") or row.get("code") or "").strip()
     if not code:
@@ -1081,7 +1089,7 @@ def _normalize_holding(row: dict) -> dict | None:
     qty = parse_num(row.get("수량") if "수량" in row else row.get("qty"))
     avg = parse_num(row.get("평단가") if "평단가" in row else row.get("avg_price"))
     return {
-        "code": clean_code(code),
+        "code": normalize_code(code),
         "name": str(row.get("종목명") or row.get("name") or "").strip(),
         "qty": qty or 0.0,
         "avg_price": avg or 0.0,
@@ -1095,7 +1103,7 @@ def _normalize_pick(row: dict) -> dict | None:
         return None
     return {
         "date": str(row.get("등록일") or row.get("date") or "").strip() or today_str(),
-        "code": clean_code(code),
+        "code": normalize_code(code),
         "name": str(row.get("종목명") or row.get("name") or "").strip(),
         "entry_price": parse_num(row.get("등록가") if "등록가" in row else row.get("entry_price")),
         "rationale": str(row.get("선정근거") or row.get("rationale") or "").strip(),
