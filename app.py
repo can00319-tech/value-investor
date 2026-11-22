@@ -385,8 +385,11 @@ def dividend_block(snap: core.StockSnapshot, hist: core.FinancialHistory | None 
     cols[0].metric("배당수익률", "-" if snap.dividend_yield is None else f"{snap.dividend_yield:.2f}%")
     cols[1].metric("주당배당금", money(snap.dps, snap.currency) if snap.dps else "-")
     cols[2].metric("기준 연도", snap.dividend_year or "-")
-    if hist and hist.series.get("주당배당금") and any(v for v in hist.series["주당배당금"]):
-        rows = hist.series_rows(["주당배당금", "배당수익률"])
+    def has_values(key: str) -> bool:
+        return bool(hist and any(v is not None for v in (hist.series.get(key) or [])))
+
+    if has_values("주당배당금") or has_values("배당수익률"):
+        rows = hist.series_rows(["주당배당금", "배당수익률"])  # type: ignore[union-attr]
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
     else:
         st.caption("연도별 배당 이력은 데이터 제공처에 없으면 표시하지 않습니다.")
