@@ -902,10 +902,18 @@ def health_comment(snap: StockSnapshot) -> list[tuple[str, str]]:
         out.append(("영업현금흐름", "확인 불가", "⚪"))
     else:
         out.append(("영업현금흐름", "양수 — 이익의 현금 전환 양호" if snap.ocf > 0 else "마이너스 — 이익 질 의심", "🟢" if snap.ocf > 0 else "🔴"))
-    per_grade = grade(snap.per, 10, 20) if (snap.per or 0) > 0 else ("적자 또는 미확인", "⚪")
-    out.append(("PER", *per_grade))
-    pbr_grade = grade(snap.pbr, 1.0, 2.0) if snap.pbr is not None else ("확인 불가", "⚪")
-    out.append(("PBR", *pbr_grade))
+    def ratio_grade(value, good: float, mid: float):
+        """PER·PBR 처럼 '배' 단위로 표시하는 지표."""
+        if value is None or value <= 0:
+            return "적자 또는 미확인", "⚪"
+        if value <= good:
+            return f"{value:.2f}배 — 양호", "🟢"
+        if value <= mid:
+            return f"{value:.2f}배 — 보통", "🟡"
+        return f"{value:.2f}배 — 부담", "🔴"
+
+    out.append(("PER", *ratio_grade(snap.per, 10, 20)))
+    out.append(("PBR", *ratio_grade(snap.pbr, 1.0, 2.0)))
     return out
 
 
