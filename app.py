@@ -741,9 +741,9 @@ def render_detail(snap: core.StockSnapshot, rules: core.FilterRules, key: str,
         trend = core.fetch_financial_history(snap.code, years=4)
         flow = core.fetch_flow(snap.code, days=5)
         val = core.valuate(snap, trend)
-        digest = core.fetch_news_digest(snap.name or snap.code,
-                                        code=snap.code if snap.market == "KR" else "",
-                                        limit=12) if show_news else core.NewsDigest()
+        digest = news_digest_for(snap.name or snap.code,
+                                 code=snap.code if snap.market == "KR" else "",
+                                 limit=12) if show_news else core.NewsDigest()
         scn = core.build_scenarios(snap, avg_price=avg_price, valuation=val)
 
     health = scn.get("health") or core.financial_health(snap)
@@ -840,6 +840,21 @@ def render_detail(snap: core.StockSnapshot, rules: core.FilterRules, key: str,
     with b3:
         st.caption("등록 시 현재가·목표가·경계선이 저장되어 이후 수익률을 자동 추적합니다. "
                    "관심종목은 4·5번 메뉴의 종목 선택 목록에 나타납니다.")
+
+
+def news_digest_for(query: str, code: str = "", limit: int = 12) -> core.NewsDigest:
+    """뉴스 수집 — 피드가 일시적으로 비면 캐시를 비우고 한 번 더 시도한다.
+
+    (Google News RSS가 간혹 빈 응답을 주면 10분 동안 빈 뉴스가 굳는 문제를 막는다.)
+    """
+    digest = core.fetch_news_digest(query, code=code, limit=limit)
+    if not digest.items:
+        try:
+            core.fetch_news_digest.cache_clear()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        digest = core.fetch_news_digest(query, code=code, limit=limit)
+    return digest
 
 
 def register_pick(snap: core.StockSnapshot, scn: dict, rationale: str) -> None:
@@ -1507,9 +1522,9 @@ def menu_news(rules: core.FilterRules) -> None:
         return
     for h in holdings[:6]:
         code = core.clean_code(h["code"])
-        digest_h = core.fetch_news_digest(h.get("name") or code,
-                                          code=code if core.detect_market(code) == "KR" else "",
-                                          limit=8)
+        digest_h = news_digest_for(h.get("name") or code,
+                                   code=code if core.detect_market(code) == "KR" else "",
+                                   limit=8)
         with st.expander(f"{h.get('name') or code} ({code}) · 수집 {len(digest_h.items)}건",
                          expanded=False):
             news_digest_block(digest_h, h.get("name", ""))
