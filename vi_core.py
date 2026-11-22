@@ -3484,11 +3484,12 @@ def portfolio_risk(summary: dict) -> dict:
         stop = avg * (1 - STOP_LOSS_PCT / 100)
         if price <= stop:
             add("major", f"손절선 이탈 — {r['종목']}",
-                f"현재가 {money(price, r['통화'])}가 평단 -{STOP_LOSS_PCT:.0f}%인 {money(stop, r['통화'])}를 밑돕니다.",
+                f"현재가 {money(price, r['통화'])}이 평단 -{STOP_LOSS_PCT:.0f}%인 "
+                f"{money(stop, r['통화'])}을 밑돕니다.",
                 "원칙(평단 -15%)을 지킬지, 실적 회복 근거로 보유할지 지금 정하세요.")
         elif price <= stop * 1.05:
             add("warn", f"손절선 근접 — {r['종목']}",
-                f"현재가 {money(price, r['통화'])}가 손절선 {money(stop, r['통화'])}의 5% 이내입니다.",
+                f"현재가 {money(price, r['통화'])}이 손절선 {money(stop, r['통화'])}의 5% 이내입니다.",
                 "다음 분기 실적과 업황 뉴스를 확인하며 대응을 미리 정해 두세요.")
 
     # 5) 고평가 구간 비중
